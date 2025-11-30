@@ -28,7 +28,7 @@
     ```
 
 ## Infer the model as VQ-VAE
-* If you put the model other than "./model_256", modify "ckpt" in "./configs/sd3unet_gq_0.25_gaussian.yaml"
+* If you put the model other than "./model_256", modify "ckpt" in "./configs/sd3unet_gq_0.25_vq.yaml"
 * Then use the model as follows
     ```Python
     from PIL import Image
@@ -70,7 +70,7 @@
     ])
 
     img = transform(Image.open("demo.png")).unsqueeze(0).cuda()
-    config = OmegaConf.load("./configs/sd3unet_gq_0.25_vq.yaml")
+    config = OmegaConf.load("./configs/sd3unet_gq_0.25_gaussian.yaml")
     vae = instantiate_from_config(config.model)
     vae = vae.eval().cuda()
 
