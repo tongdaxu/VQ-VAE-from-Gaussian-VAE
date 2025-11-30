@@ -60,24 +60,13 @@ def lfq_entropy_loss(
     batch_maximization_weight=1.0,
     eps=1e-5,
 ):
-    """
-    Entropy loss of unnormalized logits
-
-    logits: Affinities are over the last dimension
-
-    https://github.com/google-research/magvit/blob/05e8cfd6559c47955793d70602d62a2f9b0bdef5/videogvt/train_lib/losses.py#L279
-    LANGUAGE MODEL BEATS DIFFUSION — TOKENIZER IS KEY TO VISUAL GENERATION (2024)
-    """
     probs = F.softmax(logits / temperature, -1)
-
     log_probs = F.log_softmax(logits / temperature + eps, -1)
 
     avg_probs = reduce(probs, "... D -> D", "mean")
-
     avg_entropy = -torch.sum(avg_probs * torch.log(avg_probs + eps))
 
     sample_entropy = -torch.sum(probs * log_probs, -1)
-
     sample_entropy = torch.mean(sample_entropy)
 
     loss = (sample_minimization_weight * sample_entropy) - (
@@ -161,7 +150,12 @@ class LFQQuantizer(Module):
         quantized = torch.where(
             x > 0, codebook_value, -codebook_value
         )  # higher than 0 filled
-
+        quantized_flatten = rearrange(quantized, "b n c d -> b n (c d)")
+        indices_v = ((quantized_flatten + 1.0) / 2.0).to(dtype=torch.long)
+        indices = torch.zeros_like(quantized_flatten[:,:,0:1], dtype=torch.long)
+        for i in range(quantized_flatten.shape[-1]):
+            indices *= 2
+            indices += indices_v[:,:,i:i+1]
         # entropy aux loss
 
         if self.training:
@@ -200,8 +194,10 @@ class LFQQuantizer(Module):
 
         if self.format == "bchw":
             quantized = rearrange(quantized, "b (h w) c -> b c h w", h=h)
+            indices = rearrange(indices, "b (h w) c -> b c h w", h=h)
 
         info = {
+            "indices": indices,
             "entropy_aux_loss": entropy_aux_loss,
             "per_sample_entropy": per_sample_entropy.detach(),
             "codebook_entropy": codebook_entropy.detach(),
@@ -209,21 +205,35 @@ class LFQQuantizer(Module):
         }
         return quantized, info
 
+    def dequant(self, indices):
+        if self.format == "bchw":
+            b, ng, h, w = indices.shape
+            l = h * w
+            indices = rearrange(indices, "b c h w -> b (h w) c")
+        else:
+            b, l, ng = indices.shape
+        c = self.num_codebooks * self.codebook_dim
+        # b l ng, incides -> b l 16 ng value...
+        quantized = torch.zeros(
+            [b, l, ng, c], device=indices.device, dtype=torch.float32
+        )
+        for i in range(c):
+            quantized[:, :, :, 15 - i] = (indices % 2).to(dtype=torch.float32)
+            indices = indices // 2
+
+        quantized = quantized * 2.0 - 1.0  # convert to [-1, 1] range
+        if self.format == "bchw":
+            quantized = rearrange(quantized, "b (h w) c n -> b (c n) h w", h=h)
+
+        return quantized
 
 if __name__ == "__main__":
-    quantizer = LFQQuantizer(
-        format="bchw",
-        codebook_size=2**8,  # codebook size, must be a power of 2
-        num_codebooks=2,
-        sample_minimization_weight=1.0,  # within entropy loss, how much weight to give to diversity of codes, taken from https://arxiv.org/abs/1911.05894
-        batch_maximization_weight=1.0,
-    )
-
-    image_feats = torch.randn(
-        2, 16, 32, 32
-    )  # 16 is dim, must be power of 2 of codebook_size
-
-    quantized, info = quantizer(
-        image_feats
-    )  # you may want to experiment with temperature
-    print("quantized shape:", quantized.shape)
+    # Example usage
+    lfq = LFQQuantizer(format="bchw", codebook_size=256, num_codebooks=2)
+    z = torch.randn(2, 16, 32, 32)  # Example input tensor
+    z_q, info = lfq(z)
+    print(info["indices"])
+    z_q2 = lfq.dequant(info["indices"])
+    print("error", torch.mean(torch.abs(z_q - z_q2)))
+    print("Quantized shape:", z_q.shape)
+    print("Info:", info.keys())

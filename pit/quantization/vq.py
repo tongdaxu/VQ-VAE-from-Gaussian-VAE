@@ -96,7 +96,7 @@ class VQQuantizer(nn.Module):
             z_q = rearrange(z_q, "b h w c -> b (h w) c").contiguous()
             indices = rearrange(indices, "b h w c -> b (h w) c").contiguous()
 
-        return z_q, {"indice": indices, "codebook_loss": loss}
+        return z_q, {"indices": indices, "codebook_loss": loss}
 
     def dequant(self, indices):
         if self.format == "bchw":
@@ -133,7 +133,8 @@ if __name__ == "__main__":
     vq = VQQuantizer(format="bchw", n=65535, dim=16)
     z = torch.randn(2, 16, 32, 32)  # Example input tensor
     z_q, info = vq(z)
-    z_q2 = vq.dequant(info["indice"])
+    print(info["indices"])
+    z_q2 = vq.dequant(info["indices"])
     print(torch.mean(torch.abs(z_q - z_q2)))
     print("Quantized shape:", z_q.shape)
     print("Info:", info.keys())

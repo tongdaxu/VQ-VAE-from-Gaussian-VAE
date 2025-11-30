@@ -288,6 +288,8 @@ class TransformerEncoder(nn.Module):
         layers: int,
         heads: int,
         mlp_ratio: float,
+        double_z: bool,
+        z_channels: int,
         num_frames: int = 1,
         cross_frames: bool = True,
         ls_init_value: float = None,
@@ -358,6 +360,14 @@ class TransformerEncoder(nn.Module):
 
         self.ln_post = self.norm_layer(width)
 
+        if double_z:
+            self.quant_embed = nn.Linear(
+                in_features=width, out_features=z_channels * 2
+            )
+        else:
+            self.quant_embed = nn.Linear(
+                in_features=width, out_features=z_channels
+            )
         self.init_parameters()
 
     def init_parameters(self):
@@ -430,6 +440,7 @@ class TransformerEncoder(nn.Module):
         x = self.transformer(x, attn_mask, is_causal=self.mask_type == "causal")
         x = x.permute(1, 0, 2)
         x = self.ln_post(x)
+        x = self.quant_embed(x)
 
         return x
 
@@ -443,6 +454,8 @@ class TransformerDecoder(nn.Module):
         layers: int,
         heads: int,
         mlp_ratio: float,
+        double_z: bool,
+        z_channels: int,
         num_frames: int = 1,
         cross_frames: bool = True,
         ls_init_value: float = None,
@@ -533,6 +546,10 @@ class TransformerDecoder(nn.Module):
 
         self.ln_post = self.norm_layer(width) if ln_post else nn.Identity()
 
+        self.post_quant_embed = nn.Linear(
+            in_features=z_channels, out_features=width
+        )
+
         self.init_parameters()
 
     def init_parameters(self):
@@ -558,6 +575,9 @@ class TransformerDecoder(nn.Module):
         self.transformer.selective_checkpointing = selective
 
     def forward(self, x):
+
+        x = self.post_quant_embed(x)
+
         if self.num_frames == 1 or not self.cross_frames:
             x = x + self.positional_embedding.to(x.dtype)
         else:

@@ -1,9 +1,9 @@
 import argparse
 import os
 import torch.distributed as dist
+from torchvision.utils import save_image
 
 local_rank = int(os.environ["LOCAL_RANK"])
-os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
 
 import torch
 from torch.utils.data import DataLoader
@@ -53,9 +53,24 @@ if __name__ == "__main__":
         type=str,
     )
     parser.add_argument(
+        "--img_size",
+        default=265,
+        type=int,
+    )
+    parser.add_argument(
         "--bs",
         default=1,
         type=int,
+    )
+    parser.add_argument(
+        "--save",
+        default=False,
+        type=bool,
+    )
+    parser.add_argument(
+        "--save_dir",
+        default="",
+        type=str,
     )
     args = parser.parse_args()
 
@@ -68,7 +83,7 @@ if __name__ == "__main__":
 
     BS = args.bs
 
-    image_dataset = SimpleDataset(args.dataset, image_size=256)
+    image_dataset = SimpleDataset(args.dataset, image_size=args.img_size)
 
     image_sampler = torch.utils.data.distributed.DistributedSampler(
         image_dataset, shuffle=False
@@ -77,7 +92,7 @@ if __name__ == "__main__":
         image_dataset,
         BS,
         shuffle=False,
-        num_workers=8,
+        num_workers=32,
         sampler=image_sampler,
         drop_last=True,
     )
@@ -85,11 +100,14 @@ if __name__ == "__main__":
     config = OmegaConf.load(args.base)
 
     model = instantiate_from_config(config.model)
-    model = model.eval().cuda()
-    model.load_state_dict(torch.load(args.ckpt)["state_dict"])
+    model = model.eval().cuda(local_rank)
+    if args.ckpt != "":
+        missing_keys, unexpected_keys = model.load_state_dict(torch.load(args.ckpt,map_location=torch.device('cpu'))["state_dict"], strict=False)
+        # print("missing_keys")
+        # print(missing_keys)
 
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
-    inception_v3 = InceptionV3([block_idx], normalize_input=False).cuda()
+    inception_v3 = InceptionV3([block_idx], normalize_input=False).cuda(local_rank)
     inception_v3.eval()
 
     all_pred_x = [[] for _ in range(world_size)]
@@ -98,17 +116,44 @@ if __name__ == "__main__":
     all_ssim = [[] for _ in range(world_size)]
     all_msssim = [[] for _ in range(world_size)]
     all_lpips = [[] for _ in range(world_size)]
+    all_hist = torch.zeros([65536])
+
+    if args.save:
+        src_dir = os.path.join(args.save_dir, "src")
+        rec_dir = os.path.join(args.save_dir, "rec")
+        os.makedirs(src_dir, exist_ok=True)
+        os.makedirs(rec_dir, exist_ok=True)
+
     total_num = 0
 
+    def cal_ent(hist):
+        usage = torch.sum((hist == 0).to(dtype=torch.float32)) / hist.shape[0]
+        hist = hist / torch.sum(hist)
+        ent = - torch.sum(hist * torch.log2(hist + 1e-5))
+        return 1 - usage, ent
+
+    zs = []
     with torch.no_grad():
         for ii, (batch) in tqdm(enumerate(image_dataloader)):
+            fpaths = batch["fpath"]
             img = batch["img"]
-            img = img.cuda()
-            zhat = model.encode(img, return_reg_log=False)
+            img = img.cuda(local_rank)
+            zhat, info = model.encode(img, return_reg_log=True)
+            zs.append(zhat)
             rec = model.decode(zhat)
-
+            # if "indices" in info.keys():
+            #     hist = torch.histogram(info["indices"].cpu().float(), torch.range(0, 65536))
+            #     all_hist += hist[0]
             # eval metrics ...
             # PSNR
+            if args.save:
+                for b in range(len(fpaths)):
+                    fname = fpaths[b].split('/')[-1] + ".png"
+                    src_path = os.path.join(src_dir, fname)
+                    save_image(img[b], src_path, normalize=True, value_range=(-1, 1))
+                    rec_path = os.path.join(rec_dir, fname)
+                    save_image(rec[b], rec_path, normalize=True, value_range=(-1, 1))
+                
             pred_psnr = get_psnr(img, rec, zero_mean=True)
             gathered_psnr = [torch.zeros_like(pred_psnr) for _ in range(world_size)]
             torch.distributed.all_gather(gathered_psnr, pred_psnr)
@@ -151,18 +196,9 @@ if __name__ == "__main__":
 
             total_num += world_size * img.shape[0]
 
-            """
-            for jj in range(BS):
-                iname = inames[jj].split("/")[-1].split(".")[0] + ".png"
-                torchvision.utils.save_image(
-                    img[jj:jj+1], os.path.join(subdirs[0], iname), normalize=True, value_range=(-1,1)
-                )
-                torchvision.utils.save_image(
-                    rec2[jj:jj+1], os.path.join(subdirs[1], iname), normalize=True, value_range=(-1,1)
-                )
-            """
-
         if local_rank == 0:
+            zs = torch.cat(zs, dim=0)
+            zs = zs.reshape(-1).cpu().numpy()
             for j in range(world_size):
                 all_psnr[j] = torch.cat(all_psnr[j], dim=0).numpy()
             all_psnr_reorg = []

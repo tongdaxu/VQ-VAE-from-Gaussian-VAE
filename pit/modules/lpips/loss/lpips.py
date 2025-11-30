@@ -7,7 +7,7 @@ import torch.nn as nn
 from torchvision import models
 
 from ..util import get_ckpt_path
-
+import os
 
 class LPIPS(nn.Module):
     # Learned perceptual metric
@@ -26,7 +26,7 @@ class LPIPS(nn.Module):
             param.requires_grad = False
 
     def load_from_pretrained(self, name="vgg_lpips"):
-        ckpt = get_ckpt_path(name, "pit/modules/lpips/loss")
+        ckpt = get_ckpt_path(name, os.path.join(torch.hub.get_dir(), "pit/modules/lpips/loss"))
         self.load_state_dict(
             torch.load(ckpt, map_location=torch.device("cpu")), strict=False
         )

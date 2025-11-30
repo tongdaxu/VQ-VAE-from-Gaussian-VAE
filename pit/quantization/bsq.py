@@ -92,6 +92,12 @@ class BSQQuantizer(LFQQuantizer):
         quantized = torch.where(
             x > 0, codebook_value, -codebook_value
         )  # higher than 0 filled
+        indices_v = ((quantized + 1.0) / 2.0).to(dtype=torch.long)
+        indices = torch.zeros_like(indices_v[:,:,0,:], dtype=torch.long)
+        for i in range(16):
+            indices *= 2
+            indices += indices_v[:,:,i,:]
+
         quantized = x + (quantized - x).detach()  # transfer to quantized
         quantized = quantized * q_scale  # scale the quantized values
 
@@ -116,14 +122,38 @@ class BSQQuantizer(LFQQuantizer):
 
         if self.format == "bchw":
             quantized = rearrange(quantized, "b (h w) c -> b c h w", h=h)
+            indices = rearrange(indices, "b (h w) c -> b c h w", h=h)
 
         info = {
+            "indices": indices,
             "entropy_aux_loss": entropy_aux_loss,
             "per_sample_entropy": per_sample_entropy.detach(),
             "codebook_entropy": codebook_entropy.detach(),
         }
         return quantized, info
 
+    def dequant(self, indices):
+        if self.format == "bchw":
+            b, ng, h, w = indices.shape
+            l = h * w
+            indices = rearrange(indices, "b c h w -> b (h w) c")
+        else:
+            b, l, ng = indices.shape
+        # b l ng, incides -> b l 16 ng value...
+        quantized = torch.zeros(
+            [b, l, ng, 16], device=indices.device, dtype=torch.float32
+        )
+        for i in range(16):
+            quantized[:, :, :, 15 - i] = (indices % 2).to(dtype=torch.float32)
+            indices = indices // 2
+        q_scale = 1.0 / (self.embed_dim**0.5)
+
+        quantized = quantized * 2.0 - 1.0  # convert to [-1, 1] range
+        quantized *= q_scale
+        if self.format == "bchw":
+            quantized = rearrange(quantized, "b (h w) c n -> b (c n) h w", h=h)
+
+        return quantized
 
 if __name__ == "__main__":
     quantizer = BSQQuantizer(
@@ -141,4 +171,7 @@ if __name__ == "__main__":
     quantized, info = quantizer(
         image_feats
     )  # you may want to experiment with temperature
+    quantized_2 = quantizer.dequant(info["indices"])
+    print("indices shape:", info["indices"].shape)
     print("quantized shape:", quantized.shape)
+    print("err", torch.mean(torch.abs(quantized - quantized_2)))

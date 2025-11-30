@@ -24,7 +24,6 @@ class FSQQuantizer(nn.Module):
         )
         self.dim = self.levels.shape[0]
         self.format = format
-
         assert self.format in ["bchw", "blc"]
 
     def _quantize(self, zhat, eps=1e-3):
@@ -55,17 +54,31 @@ class FSQQuantizer(nn.Module):
 
         zhat, indices = self._quantize(zhat)
 
+        indices_out = torch.zeros_like(indices[:,:,0:1])
+
+        for l in range(len(self.levels)):
+            indices_out *= self.levels[l]
+            indices_out += indices[:, :, l:l + 1]
+
         if self.format == "bchw":
             zhat = rearrange(zhat, "b (h w) c -> b c h w", h=h)
-            indices = rearrange(indices, "b (h w) c -> b c h w", h=h)
+            indices_out = rearrange(indices_out, "b (h w) c -> b c h w", h=h)
 
-        info = {"indices": indices, "bits": torch.sum(torch.log2(self.levels)) * ndim}
+        info = {"indices": indices_out, "bits": torch.sum(torch.log2(self.levels)) * ndim}
         return zhat, info
 
     def dequant(self, indices):
         if self.format == "bchw":
             b, c, h, w = indices.shape
             indices = rearrange(indices, "b c h w -> b (h w) c")
+
+        indices_list = []
+        for l in reversed(range(len(self.levels))):
+            indices_i = indices % self.levels[l]
+            indices_list.append(indices_i)
+            indices = indices // self.levels[l]
+
+        indices = torch.cat(indices_list[::-1], dim=2)
 
         half_width = self.levels // 2
         zhat = (indices - half_width) / half_width
@@ -91,12 +104,14 @@ class FSQQuantizer(nn.Module):
 
 
 if __name__ == "__main__":
-    z = torch.randn([16, 2, 4, 4]).cuda()
-    fsq = FSQQuantizer([8, 8], "bchw").cuda()
+    z = torch.randn([16, 4, 8, 8]).cuda()
+    fsq = FSQQuantizer([8, 8, 5, 5], "bchw").cuda()
     zhat, info = fsq(z)
-    zhat2 = fsq.dequant(info["indices"])
+    indices = info["indices"]
 
-    zhat_gen = fsq.generate([16, 2, 4, 4])
+    print(indices.reshape(-1)[:8])
+
+    zhat2 = fsq.dequant(indices)
 
     print("quant error", torch.mean(torch.abs(z - zhat2)))
     print("dequant error", torch.mean(torch.abs(zhat - zhat2)))

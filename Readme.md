@@ -1,75 +1,125 @@
-# Pytorch Image Tokenizer
-* A fork of https://github.com/Stability-AI/generative-models, with focus on tokenizers
-    * Practical size implementation and training code for popular tokenizers, such as VQ, FSQ, LFQ, BSQ
-    * Both stable diffusion unet and bsq vit backbone support
-    * With pre-trained model and benchmark on ImageNet 256x256 
+# State-of-the-Art VQ-VAE from Gaussian VAE without Training!
+* We train a Gaussian VAE, convert it into VQ-VAE with almost 100% codebook usage, and keeps reconstruction performance!
+* Pre-trained models can be found in [Huggingface](https://huggingface.co/xutongda/GQModel)
+* As flexible to setup as VQ-VAE, supporting: codebook size, codebook dimension, codebook number
 
-# Usage 
-## Prequisites
+# Quick Start 
+## Install dependency
 * dependency in environment.yaml
     ```bash
     conda env create --file=environment.yaml
     conda activate tokenizer
     ```
-## Installation
+## Install this package
 * from source
     ```bash
-    pip install .
+    pip install -e .
     ```
-
-## Prepare your dataset
-* It is recommend to list the dataset in advanced using
+* [optional] CUDA kernel for fast run time
     ```bash
-    python scripts/create_dataset_list.py --root $PATH_TO_DATASET_FOLDER --ext $IMAGE_EXTENSION --out $PATH_TO_OUTFILE
+    cd gq_cuda_extension
+    pip install --no-build-isolation -e .
     ```
-* It is not mandatory, just speed up training
-
-## Training Tokenizers using default config
-* modify the yaml file according to your system, pay special attention to "trainer-device", "trainer-num_nodes", "data-train-params-root"
-* __Gaussian VAE__ with stable diffusion UNet
+## Download pre-trained model 
+* Download model "sd3unet_gq_0.25.ckpt" from [Huggingface](https://huggingface.co/xutongda/GQModel):
     ```bash
-    python main.py --config sd3unet_gaussian_kl_0.64.yaml --wandb
+    mkdir model_256
+    mv "sd3unet_gq_0.25.ckpt" ./model_256
     ```
 
-* __FSQ__ with stable diffusion UNet
+## Infer the model as VQ-VAE
+* If you put the model other than "./model_256", modify "ckpt" in "./configs/sd3unet_gq_0.25_gaussian.yaml"
+* Then use the model as follows
+    ```Python
+    from PIL import Image
+    from torchvision import transforms
+    from omegaconf import OmegaConf
+    from pit.util import instantiate_from_config
+
+    transform = transforms.Compose([
+        transforms.Resize((256,256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5],
+                            std=[0.5, 0.5, 0.5])
+    ])
+
+    img = transform(Image.open("demo.png")).unsqueeze(0).cuda()
+    config = OmegaConf.load("./configs/sd3unet_gq_0.25_vq.yaml")
+    vae = instantiate_from_config(config.model)
+    vae = vae.eval().cuda()
+
+    indices = vae.quant(img)[1] # discrete indices
+    img_hat = vae.dequant(indices)
+    ```
+
+## Infer the model as Gaussian VAE
+* If you put the model other than "./model_256", modify "ckpt" in "./configs/sd3unet_gq_0.25_gaussian.yaml"
+* Alternatively, the model can be used as a Vanilla Gaussian VAE
+* Then use the model as follows
+    ```Python
+    from PIL import Image
+    from torchvision import transforms
+    from omegaconf import OmegaConf
+    from pit.util import instantiate_from_config
+
+    transform = transforms.Compose([
+        transforms.Resize((256,256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5],
+                            std=[0.5, 0.5, 0.5])
+    ])
+
+    img = transform(Image.open("demo.png")).unsqueeze(0).cuda()
+    config = OmegaConf.load("./configs/sd3unet_gq_0.25_vq.yaml")
+    vae = instantiate_from_config(config.model)
+    vae = vae.eval().cuda()
+
+    z = vae.encode(img) # continous representation
+    img_hat = vae.decode(z)
+    ```
+
+# Train your own VQ-VAE
+* Determine the VQ-VAE parameters:
+    * codebook_size: the codebook size, must be 2**N
+    * codebook_dimension: the dimension for each codebook
+    * codebook_number: number of sub codebook per spatial dimension
+
+* Setup "sd3unet_gq_0.25_train.yaml" according to VQ-VAE parameters:
+    * n_samples: = codebook_size size, must be 2**N
+    * group: = codebook_dimension, dim of each codebook
+    * z_channels: = codebook_dimension * codebook_number, total dim of codebook
+
+* Setup "sd3unet_gq_0.25_train.yaml" according to dataset path
+    * root: dataset root
+    * image_size: target image size
+    * batch_size: batch size
+
+* Run the training! The default "sd3unet_gq_0.25_train.yaml" is setup for codebook_dimension=16, codebook_number=1, codebook_size=2**16=65536
     ```bash
-    python main.py --config sd3unet_fsq_16.yaml --wandb
+    export WANDB_API_KEY=$YOUR_WANDB_API_KEY
+    python main.py --base configs/sd3unet_gq_0.25_train.yaml --wandb
     ```
 
-* __LFQ__ with stable diffusion UNet
-    ```bash
-    python main.py --config sd3unet_lfq_16.yaml --wandb
-    ```
-* check ./configs/ for more
-
-## Evaluating Tokenizers
-* usage
+* Run the evaluation!
+    * After the training, modfiy the "ckpt" key in "sd3unet_gq_0.25_vq.yaml" and adjust n_samples, group and z_channels accordingly. Then, evaluate the model as 
     ```bash
     python -m torch.distributed.launch --standalone --use-env \
-    --nproc-per-node=8 eval.py \
-    --bs=32 \
-    --base=$PATH_TO_YAML_CONFIG \
-    --ckpt=$PATH_TO_CKPT \
-    --dataset=$PATH_TO_DATASET_FOLDER
+        --nproc-per-node=1 eval.py \
+        --bs=16 \
+        --img_size 256 \
+        --base=/workspace/cogview_dev/xutd/xu/pytorch-image-tokenizer/configs/sd3unet_gq_0.25_vq.yaml \
+        --dataset=$IMAGE_FOLDER_PATH
     ```
 
-# Pre-trained models and benchmark
-* All models are trained with ImageNet train set, on 8xA100 GPU for around 30 epochs, which takes around 24 hours 
-* All models available in https://huggingface.co/xutongda/pytorch-image-tokenizer-models
+# Why it Works?
+* The only difference between our Gaussian VAE and vanilla Gaussian VAE is the KL divergence penralization. 
+    * The key difference in training is class "GaussianQuantTrainRegularizer" in "./pit/quantization/gaussian.py".
+    * The key to convert to VQ-VAE is class "GaussianQuantRegularizer" "./pit/quantization/gaussian.py".
+* Basically we limit the KL divergence of Gaussian VAE close to log2 codebook size. Once this constraint is met, the Gaussian VAE can be converted to VQ-VAE without much loss. 
+* For more information, wait for our paper to come out!
 
-| spec          | config                  | model                    | PSNR  | SSIM  | LPIPS | rFID  |
-|---------------|-------------------------|--------------------------|-------|-------|-------|-------|
-| LFQ 2^16x1024 | sd3unet_lfq_16.yaml     | sd3unet_lfq_16.ckpt      | 22.65 | 0.635 | 0.141 | 3.523 |
-| FSQ 2^16x1024 | sd3unet_fsq_16.yaml | sd3unet_fsq_16.ckpt  | 26.87 | 0.785 | 0.072 | 1.161 |
-| BSQ 2^16x1024 | sd3unet_bsq_16.yaml     | sd3unet_bsq_16.ckpt      | 25.62 | 0.754 | 0.086 | 1.080 |
 
-# Reference
-* main structure is a fork from: https://github.com/Stability-AI/generative-models
-* bsq, vit and evaluation from: https://github.com/zhaoyue-zephyrus/bsq-vit
-* lfq from: https://github.com/TencentARC/SEED-Voken
-* vq from: https://github.com/ai-forever/MoVQGAN
-* [VQ NIPS 17] Neural Discrete Representation Learning
-* [LFQ ICLR 24] Language Model Beats Diffusion: Tokenizer is key to visual generation
-* [FSQ ICLR 24] Finite Scalar Quantization: VQ-VAE Made Simple
-* [BSQ ICLR 25] Image and Video Tokenization with Binary Spherical Quantization
- 
+# Contact & Ack
+* Largely from https://github.com/Stability-AI/generative-models
+* Any questions or comments goes to: x.tongda@nyu.edu
+* Or if you have wechat: 18510201763
