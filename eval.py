@@ -100,12 +100,11 @@ if __name__ == "__main__":
     config = OmegaConf.load(args.base)
 
     model = instantiate_from_config(config.model)
-    model = model.eval().cuda(local_rank)
     if args.ckpt != "":
         missing_keys, unexpected_keys = model.load_state_dict(torch.load(args.ckpt,map_location=torch.device('cpu'))["state_dict"], strict=False)
         # print("missing_keys")
         # print(missing_keys)
-
+    model = model.eval().cuda(local_rank)
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
     inception_v3 = InceptionV3([block_idx], normalize_input=False).cuda(local_rank)
     inception_v3.eval()

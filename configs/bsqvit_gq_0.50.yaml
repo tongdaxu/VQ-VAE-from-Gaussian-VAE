@@ -29,9 +29,6 @@ model:
         format: blc
         group: 8
         n_samples: 65536
-        seed: 42
-        beta: 1.0
-        backend: cuda
     
     encoder_config:
       target: pit.modules.vit.TransformerEncoder
