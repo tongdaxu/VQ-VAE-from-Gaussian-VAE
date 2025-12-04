@@ -60,6 +60,7 @@ class aux_foundation_model(nn.Module):
         return self.model.forward_features(x)[:, 1:].reshape(b, h//16, w//16, -1).permute(0, 3, 1, 2)
     
     def forward_dinov2(self, x):
+        x = nn.functional.interpolate(x, size=(256, 256), mode='bilinear', align_corners=False)
         b, c, h, w = x.shape
         if self.down_factor==16:
             x = nn.functional.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)

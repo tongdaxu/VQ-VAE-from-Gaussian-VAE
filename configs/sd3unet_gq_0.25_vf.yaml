@@ -3,6 +3,10 @@ model:
   target: pit.models.autoencoder.AutoencodingEngine
   params:
     input_key: img
+
+    use_vf: dinov2
+    reverse_proj: true
+
     loss_config:
       target: pit.modules.losses.discriminator_loss.GeneralLPIPSWithDiscriminator
       params:
@@ -10,7 +14,12 @@ model:
         disc_start: 20001
         disc_weight: 0.75
         learn_logvar: True
-    
+
+        vf_weight: 0.2
+        adaptive_vf: true
+        distmat_margin: 0.25
+        cos_margin: 0.5
+
         regularization_weights:
           kl_loss: 0.1
 
@@ -27,28 +36,28 @@ model:
     regularizer_config:
       target: pit.quantization.gaussian.GaussianQuantRegularizer
       params:
-        format: blc
-        group: 8
+        format: bchw
+        group: 16
         n_samples: 65536
-    
+
     encoder_config:
-      target: pit.modules.vit.TransformerEncoder
+      target: pit.modules.unet.Encoder
       params:
+        attn_type: vanilla
         double_z: true
         z_channels: 16
-        image_size: 256
-        patch_size: 8
-        width: 768
-        layers: 12
-        heads: 12
-        mlp_ratio: 4
-        drop_rate: 0.
+        resolution: 256
+        in_channels: 3
+        out_ch: 3
+        ch: 128
+        ch_mult: [1, 2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: [32]
+        dropout: 0.
     
     decoder_config:
-      target: pit.modules.vit.TransformerDecoder
+      target: pit.modules.unet.Decoder
       params: ${model.params.encoder_config.params}
-
-    clamp_range: [-1,1]
 
 lightning:
 

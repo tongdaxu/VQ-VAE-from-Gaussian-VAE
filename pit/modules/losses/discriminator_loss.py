@@ -31,6 +31,12 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         regularization_weights: Union[None, Dict[str, float]] = None,
         additional_log_keys: Optional[List[str]] = None,
         discriminator_config: Optional[Dict] = None,
+        vf_weight = 0.1,
+        adaptive_vf = True,
+        cos_margin = 0.5,
+        distmat_margin = 0.25,
+        distmat_weight = 1.0,
+        cos_weight = 1.0
     ):
         super().__init__()
         self.dims = dims
@@ -44,6 +50,14 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         assert disc_loss in ["hinge", "vanilla"]
         self.perceptual_loss = LPIPS().eval()
         self.perceptual_weight = perceptual_weight
+
+        self.vf_weight = vf_weight
+        self.adaptive_vf = adaptive_vf
+        self.cos_margin = cos_margin
+        self.distmat_margin = distmat_margin
+        self.distmat_weight = distmat_weight
+        self.cos_weight = cos_weight
+
         # output log variance
         self.logvar = nn.Parameter(
             torch.full((), logvar_init), requires_grad=learn_logvar
@@ -75,6 +89,7 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
             "optimizer_idx",
             "global_step",
             "last_layer",
+            "enc_last_layer",
             "split",
             "regularization_log",
         ]
@@ -204,6 +219,19 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         d_weight = d_weight * self.discriminator_weight
         return d_weight
 
+    def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer=None):
+        if last_layer is not None:
+            nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True, allow_unused=True)[0]
+            vf_grads = torch.autograd.grad(vf_loss, last_layer, retain_graph=True, allow_unused=True)[0]
+        else:
+            nll_grads = torch.autograd.grad(nll_loss, self.last_layer[0], retain_graph=True, allow_unused=True)[0]
+            vf_grads = torch.autograd.grad(vf_loss, self.last_layer[0], retain_graph=True, allow_unused=True)[0]
+
+        vf_weight = torch.norm(nll_grads) / (torch.norm(vf_grads) + 1e-4)
+        vf_weight = torch.clamp(vf_weight, 0.0, 1e8).detach()
+        vf_weight = vf_weight * self.vf_weight
+        return vf_weight
+
     def forward(
         self,
         inputs: torch.Tensor,
@@ -213,6 +241,7 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         optimizer_idx: int,
         global_step: int,
         last_layer: torch.Tensor,
+        enc_last_layer = None,
         split: str = "train",
         weights: Union[None, float, torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict]:
@@ -220,12 +249,6 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
             inputs = torch.nn.functional.interpolate(
                 inputs, reconstructions.shape[2:], mode="bicubic", antialias=True
             )
-
-        # if self.dims > 2:
-        #     inputs, reconstructions = map(
-        #         lambda x: rearrange(x, "b c t h w -> (b t) c h w"),
-        #         (inputs, reconstructions),
-        #     )
 
         rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
         if self.perceptual_weight > 0:
@@ -263,8 +286,37 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
                 d_weight = torch.tensor(0.0)
                 g_loss = torch.tensor(0.0, requires_grad=True)
 
-            loss = weighted_nll_loss + d_weight * self.disc_factor * g_loss
+            # vf loss
+            if "zp" in regularization_log and "aux_feature" in regularization_log:
+                zp = regularization_log["zp"]
+                aux_feature = regularization_log["aux_feature"]
+                z_flat = rearrange(zp, 'b c h w -> b c (h w)')
+                aux_feature_flat = rearrange(aux_feature, 'b c h w -> b c (h w)')
+                z_norm = torch.nn.functional.normalize(z_flat, dim=1)
+                aux_feature_norm = torch.nn.functional.normalize(aux_feature_flat, dim=1)
+                z_cos_sim = torch.einsum('bci,bcj->bij', z_norm, z_norm)
+                aux_feature_cos_sim = torch.einsum('bci,bcj->bij', aux_feature_norm, aux_feature_norm)
+                diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
+                vf_loss_1 = torch.nn.functional.relu(diff-self.distmat_margin).mean()
+                vf_loss_2 = torch.nn.functional.relu(1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, zp)).mean()
+                vf_loss = vf_loss_1*self.distmat_weight + vf_loss_2*self.cos_weight
+            else:
+                vf_loss = None
+
             log = dict()
+
+            if vf_loss is not None:
+                log[f"{split}/loss/vf"] = vf_loss.detach().float().mean()
+                if self.adaptive_vf:
+                    if self.training:
+                        vf_weight = self.calculate_adaptive_weight_vf(nll_loss, vf_loss, last_layer=enc_last_layer)
+                    else:
+                        vf_weight = torch.tensor(0.0)
+                else:
+                    vf_weight = self.vf_weight
+                loss = weighted_nll_loss + d_weight * self.disc_factor * g_loss+ vf_weight * vf_loss
+            else:
+                loss = weighted_nll_loss + d_weight * self.disc_factor * g_loss
 
             for k in regularization_log:
                 if k in self.regularization_weights:
@@ -281,8 +333,8 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
                     f"{split}/scalars/d_weight": d_weight.detach(),
                 }
             )
-
             return loss, log
+
         elif optimizer_idx == 1:
             # second pass for discriminator update
             logits_real = self.discriminator(inputs.contiguous().detach())

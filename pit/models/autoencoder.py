@@ -12,31 +12,15 @@ from pit.modules.flux.util import load_flow_model2, load_flow_model_control
 from pit.modules.flux.xflux_pipeline import XFluxPipelineClean
 from diffusers import FluxPriorReduxPipeline
 from pit.modules.flux.modules.layers import DoubleStreamBlockLoraProcessor, SingleStreamBlockLoraProcessor
-from pit.modules.flux.util import (load_ae, load_flow_model2, load_controlnet, load_checkpoint)
+from pit.modules.flux.util import (load_ae, load_controlnet, load_checkpoint)
 from pit.models.hyvae import HunyuanVAE2D
+from pit.models.foundation_models import aux_foundation_model
 from pit.util import (
     default,
     instantiate_from_config,
     get_obj_from_str,
 )
-from einops import rearrange
 
-import INN.INNAbstract as INNAbstract
-from INN.CouplingModels.conv import CouplingConv
-from INN.CouplingModels.utils import _default_2d_coupling_function
-
-class PixelUnshuffle2d(INNAbstract.PixelShuffleModule):
-    def __init__(self, r):
-        super(PixelUnshuffle2d, self).__init__()
-        self.r = r
-        self.shuffle = nn.PixelShuffle(r)
-        self.unshuffle = nn.PixelUnshuffle(r)
-    
-    def PixelShuffle(self, x):
-        return self.unshuffle(x)
-    
-    def PixelUnshuffle(self, x):
-        return self.shuffle(x)
 
 class AutoencoderKLQwenImage(pl.LightningModule):
     def __init__(self,):
@@ -233,115 +217,6 @@ class AutoencoderKLHYImage3(pl.LightningModule):
         return xhat
 
 
-import INN
-import INN.INNAbstract as INNAbstract
-from INN.CouplingModels.conv import CouplingConv
-from INN.CouplingModels.utils import _default_2d_coupling_function
-
-class PixelUnshuffle2d(INNAbstract.PixelShuffleModule):
-    def __init__(self, r):
-        super(PixelUnshuffle2d, self).__init__()
-        self.r = r
-        self.shuffle = nn.PixelShuffle(r)
-        self.unshuffle = nn.PixelUnshuffle(r)
-    
-    def PixelShuffle(self, x):
-        return self.unshuffle(x)
-    
-    def PixelUnshuffle(self, x):
-        return self.shuffle(x)
-
-class residual_2d_coupling_function(nn.Module):
-    def __init__(self, channels, kernel_size, activation_fn=nn.ReLU, w=4):
-        super(residual_2d_coupling_function, self).__init__()
-        if kernel_size % 2 != 1:
-            raise ValueError(f'kernel_size must be an odd number, but got {kernel_size}')
-        r = kernel_size // 2
-
-        self.activation_fn = activation_fn
-        
-        self.f = nn.Sequential(nn.Conv2d(channels, channels * w, kernel_size, padding=r),
-                               activation_fn(),
-                               nn.Conv2d(w * channels, w * channels, kernel_size, padding=r),
-                               activation_fn(),
-                               nn.Conv2d(w * channels, channels, kernel_size, padding=r)
-                              )
-        self.f.apply(self._init_weights)
-        for name, param in self.f.named_parameters():
-            if "4.weight" in name:
-                torch.nn.init.zeros_(param.data)
-    
-    def _init_weights(self, m):
-        
-        if type(m) == nn.Conv2d:
-            # doing xavier initialization
-            # NOTE: Kaiming initialization will make the output too high, which leads to nan
-            torch.nn.init.xavier_uniform_(m.weight.data)
-            # torch.nn.init.zeros_(m.weight.data)
-            torch.nn.init.zeros_(m.bias.data)
-
-    def forward(self, x):
-        return self.f(x) + x
-
-from INN.CouplingModels.conv import CouplingConv
-
-class ResConvNICE(CouplingConv):
-    '''
-    1-d invertible convolution layer by NICE method
-    '''
-    def __init__(self, channels, kernel_size, w=4, activation_fn=nn.ReLU, mask=None):
-        super(ResConvNICE, self).__init__(num_feature=channels, mask=mask)
-        self.m1 = None
-        self.m2 = None
-    
-    def forward(self, x):
-        mask = self.working_mask(x)
-        
-        x_ = mask * x
-        x = x + (1-mask) * self.m1(x_)
-        
-        x_ = (1-mask) * x
-        x = x + mask * self.m2(x_)
-        return x
-    
-    def inverse(self, y):
-        mask = self.working_mask(y)
-        
-        y_ = (1-mask) * y
-        y = y - mask * self.m2(y_)
-        
-        y_ = mask * y
-        y = y - (1-mask) * self.m1(y_)
-        
-        return y
-    
-    def logdet(self, **args):
-        return 0
-
-class ResConv2dNICE(ResConvNICE):
-    '''
-    1-d invertible convolution layer by NICE method
-    '''
-    def __init__(self, channels, kernel_size, w=4, activation_fn=nn.ReLU, mask=None):
-        super(ResConv2dNICE, self).__init__(channels, kernel_size, w=w, activation_fn=activation_fn, mask=mask)
-        self.kernel_size = kernel_size
-        self.m1 = residual_2d_coupling_function(channels, kernel_size, activation_fn, w=w)
-        self.m2 = residual_2d_coupling_function(channels, kernel_size, activation_fn, w=w)
-
-    def forward(self, x, log_p0=0, log_det_J=0):
-        y = super(ResConv2dNICE, self).forward(x)
-        if self.compute_p:
-            return y, log_p0, log_det_J + self.logdet()
-        else:
-            return y
-    
-    def inverse(self, y, **args):
-        x = super(ResConv2dNICE, self).inverse(y)
-        return x
-    
-    def __repr__(self):
-        return f'Conv2dNICE(channels={self.num_feature}, kernel_size={self.kernel_size})'
-
 class AutoencodingEngine(pl.LightningModule):
     """
     Base class for all image autoencoders that we train, like VQGAN or AutoencoderKL
@@ -369,11 +244,10 @@ class AutoencodingEngine(pl.LightningModule):
         ckpt_engine: Union[None, str, dict] = None,
         ckpt_path: Optional[str] = None,
         additional_decode_keys: Optional[List[str]] = None,
+        use_vf = None,
+        reverse_proj = False,
         clamp_range = None,
         latent_stats = False,
-        use_vf_flow = False,
-        vf_flow_down = 1,
-        encode_patch = -1,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -388,50 +262,19 @@ class AutoencodingEngine(pl.LightningModule):
         if self.latent_stats:
             self.latent_mean = nn.Parameter(torch.zeros([1,encoder_config.params.z_channels,1,1]), requires_grad=False)
             self.latent_std = nn.Parameter(torch.zeros([1,encoder_config.params.z_channels,1,1]), requires_grad=False)
-        self.use_vf_flow = use_vf_flow
-        if self.use_vf_flow:
-            import INN
-            embed_dim = encoder_config.params.z_channels
-            if vf_flow_down == -1:
-                self.flow = INN.Sequential(
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                )
-            elif vf_flow_down == 0:
-                self.flow = INN.Sequential(
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                )
-            elif vf_flow_down == 1:
-                self.flow = INN.Sequential(
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU), # 16
-                    INN.PixelShuffle2d(2), # 8
-                    INN.Conv2d(embed_dim * 4, 3, activation_fn=nn.GELU),
-                    INN.Conv2d(embed_dim * 4, 3, activation_fn=nn.GELU),
-                    PixelUnshuffle2d(2),
-                    INN.Conv2d(embed_dim, 3, activation_fn=nn.GELU),
-                )
-            elif vf_flow_down == 2:
-                self.flow = INN.Sequential(
-                    ResConv2dNICE(embed_dim, 3), # 16
-                    INN.PixelShuffle2d(2), # 8
-                    ResConv2dNICE(embed_dim * 4, 3),
-                    INN.PixelShuffle2d(2), # 4
-                    ResConv2dNICE(embed_dim * 16, 3),
-                    ResConv2dNICE(embed_dim * 16, 3),
-                    PixelUnshuffle2d(2),
-                    ResConv2dNICE(embed_dim * 4, 3),
-                    PixelUnshuffle2d(2),
-                    ResConv2dNICE(embed_dim, 3),
-                )
-            else:
-                assert(0)
-            self.flow.computing_p(False)
 
-        self.encode_patch = encode_patch
+        if use_vf is not None:
+            self.use_vf = use_vf
+            print(f"Using {use_vf} as auxiliary feature.")
+            self.foundation_model = aux_foundation_model(use_vf)
+            vf_feature_dim = self.foundation_model.feature_dim
+            embed_dim = encoder_config["params"]["z_channels"]
+            self.linear_proj = torch.nn.Conv2d(vf_feature_dim, embed_dim, kernel_size=1, bias=True)
+            if reverse_proj:
+                self.linear_proj = torch.nn.Conv2d(embed_dim, vf_feature_dim, kernel_size=1, bias=False)
+        else:
+            self.use_vf = None
+        self.reverse_proj = reverse_proj
 
         if not eval_only:
             
@@ -499,6 +342,8 @@ class AutoencodingEngine(pl.LightningModule):
             params += list(self.regularization.get_trainable_parameters())
         params = params + list(self.encoder.parameters())
         params = params + list(self.decoder.parameters())
+        if self.use_vf is not None:
+            params = params + list(self.linear_proj.parameters())
         return params
 
     def get_discriminator_params(self) -> list:
@@ -524,9 +369,6 @@ class AutoencodingEngine(pl.LightningModule):
             return z, dict()
 
         z, reg_log = self.regularization(z)
-        if self.use_vf_flow:
-            reg_log["z_original"] = z
-            z = self.flow(z)
 
         if self.latent_stats:
             z = (z - self.latent_mean) / self.latent_std
@@ -536,9 +378,6 @@ class AutoencodingEngine(pl.LightningModule):
         return z
 
     def decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
-
-        if self.use_vf_flow:
-            z = self.flow.inverse(z)
 
         if self.latent_stats:
             z = z * self.latent_std + self.latent_mean
@@ -568,6 +407,17 @@ class AutoencodingEngine(pl.LightningModule):
                 z, reg_log = self.encode(x, return_reg_log=True)
 
         dec = self.decode(z, **additional_decode_kwargs)
+
+        if self.use_vf is not None:
+            aux_feature = self.foundation_model(x)
+            if not self.reverse_proj:
+                aux_feature = self.linear_proj(aux_feature)
+            else:
+                zp = torch.nn.functional.interpolate(z, size=(aux_feature.shape[2], aux_feature.shape[3]), mode="bilinear")
+                zp = self.linear_proj(zp)
+            reg_log["aux_feature"] = aux_feature
+            reg_log["zp"] = zp
+
         if self.clamp_range is not None:
             dec = torch.clamp(dec, self.clamp_range[0], self.clamp_range[1])
         return z, dec, reg_log
@@ -590,6 +440,10 @@ class AutoencodingEngine(pl.LightningModule):
                 "regularization_log": regularization_log,
                 "autoencoder": self,
             }
+            if self.use_vf:
+                extra_info["enc_last_layer"] = self.encoder.conv_out.weight
+            else:
+                extra_info["enc_last_layer"] = None
             extra_info = {k: extra_info[k] for k in self.loss.forward_keys}
         else:
             extra_info = dict()

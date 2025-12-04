@@ -11,9 +11,10 @@ model:
         disc_weight: 0.75
         learn_logvar: True
     
-        regularization_weights: null
+        regularization_weights:
+          kl_loss: 0.1
 
-        additional_log_keys: null
+        additional_log_keys: ["kl_loss", "bits-mean", "bits-min", "bits-max"]
 
         discriminator_config:
           target: pit.modules.lpips.model.model.NLayerDiscriminator

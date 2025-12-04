@@ -124,6 +124,9 @@
         --dataset=$IMAGE_FOLDER_PATH
     ```
 
+# Train with VAVAE Like Alignment
+* See "configs/sd3unet_gq_0.25_vf.yaml".
+
 # Why it Works?
 * The only difference between our Gaussian VAE and vanilla Gaussian VAE is the KL divergence penralization. 
     * The key difference is class "GaussianQuantRegularizer" in "./pit/quantization/gaussian.py".
