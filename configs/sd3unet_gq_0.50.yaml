@@ -30,7 +30,8 @@ model:
         format: bchw
         group: 8
         n_samples: 65536
-    
+        backend: cuda
+
     encoder_config:
       target: pit.modules.unet.Encoder
       params:

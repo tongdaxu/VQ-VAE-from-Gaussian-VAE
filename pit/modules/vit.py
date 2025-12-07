@@ -569,6 +569,9 @@ class TransformerDecoder(nn.Module):
             trunc_normal_(self.ffn[0].weight, std=0.02)
         trunc_normal_(self.conv_out.weight, std=0.02)
 
+    def get_last_layer(self, **kwargs):
+        return self.conv_out.weight
+
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True, selective=False):
         self.transformer.grad_checkpointing = enable

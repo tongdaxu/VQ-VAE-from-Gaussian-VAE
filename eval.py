@@ -3,8 +3,6 @@ import os
 import torch.distributed as dist
 from torchvision.utils import save_image
 
-local_rank = int(os.environ["LOCAL_RANK"])
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -21,6 +19,9 @@ from pit.evaluations.psnr import get_psnr
 from pit.evaluations.ssim import get_ssim_and_msssim
 from pit.evaluations.fid.inception import InceptionV3
 from pit.data import SimpleDataset
+import torch.distributed as dist
+
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def print_dict(dict_stat):
@@ -74,12 +75,20 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ['WORLD_SIZE'])
+
+    torch.cuda.set_device(local_rank)
+
     dist.init_process_group(
         backend=args.dist_backend,
         init_method="env://",
+        rank=local_rank,
+        world_size=world_size,
     )
 
-    world_size = dist.get_world_size()
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
 
     BS = args.bs
 
@@ -104,9 +113,9 @@ if __name__ == "__main__":
         missing_keys, unexpected_keys = model.load_state_dict(torch.load(args.ckpt,map_location=torch.device('cpu'))["state_dict"], strict=False)
         # print("missing_keys")
         # print(missing_keys)
-    model = model.eval().cuda(local_rank)
+    model = model.eval().to(device)
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
-    inception_v3 = InceptionV3([block_idx], normalize_input=False).cuda(local_rank)
+    inception_v3 = InceptionV3([block_idx], normalize_input=False).to(device)
     inception_v3.eval()
 
     all_pred_x = [[] for _ in range(world_size)]
@@ -136,7 +145,7 @@ if __name__ == "__main__":
         for ii, (batch) in tqdm(enumerate(image_dataloader)):
             fpaths = batch["fpath"]
             img = batch["img"]
-            img = img.cuda(local_rank)
+            img = img.to(device)
             zhat, info = model.encode(img, return_reg_log=True)
             zs.append(zhat)
             rec = model.decode(zhat)
