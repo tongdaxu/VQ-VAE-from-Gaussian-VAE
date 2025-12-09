@@ -3,6 +3,7 @@ model:
   target: pit.models.autoencoder.AutoencodingEngine
   params:
     input_key: img
+    ckpt_path: /workspace/cogview_dev/xutd/xu/generative-models/logs/2025-05-15T06-41-27_sd3.5_c16_kl_7.68_even/checkpoints/last.ckpt
     loss_config:
       target: pit.modules.losses.discriminator_loss.GeneralLPIPSWithDiscriminator
       params:
@@ -11,10 +12,9 @@ model:
         disc_weight: 0.75
         learn_logvar: True
     
-        regularization_weights:
-          kl_loss: 0.1
+        regularization_weights: null
 
-        additional_log_keys: ["kl_loss", "bits-mean", "bits-min", "bits-max"]
+        additional_log_keys: null
 
         discriminator_config:
           target: pit.modules.lpips.model.model.NLayerDiscriminator
@@ -25,12 +25,9 @@ model:
             use_actnorm: True
 
     regularizer_config:
-      target: pit.quantization.gaussian.GaussianQuantRegularizer2
+      target: pit.quantization.gaussian.GaussianRegularizer
       params:
-        dim: 16
-        codebook_size: 65536
-        backend: cuda
-        use_ste: False
+        format: bchw
 
     encoder_config:
       target: pit.modules.unet.Encoder
@@ -83,7 +80,7 @@ lightning:
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
-    max_epochs: 40
+    max_epochs: 10000
 
 data:
   target: pit.data.ImageDataModuleFromConfig

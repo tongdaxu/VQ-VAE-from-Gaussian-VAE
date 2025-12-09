@@ -1,0 +1,59 @@
+model:
+  base_learning_rate: 1e-5
+  target: pit.models.autoencoder.AutoencoderKLQwenImage
+
+lightning:
+
+  modelcheckpoint:
+    params:
+      every_n_train_steps: 5000
+      save_top_k: -1
+
+  callbacks:
+    metrics_over_trainsteps_checkpoint:
+      params:
+        every_n_train_steps: 10000
+  
+    image_logger:
+      target: main_image.ImageLogger
+      params:
+        disabled: False
+        enable_autocast: False
+        batch_frequency: 1000
+        max_images: 8
+        increase_log_steps: True
+        log_first_step: True
+        log_images_kwargs:
+          N: 8
+          n_rows: 2
+  
+  trainer:
+    devices: 0,1,2,3,4,5,6,7
+    num_nodes: 1
+    precision: bf16-mixed
+    benchmark: True
+    num_sanity_val_steps: 0
+    accumulate_grad_batches: 1
+    max_epochs: 10000
+
+data:
+  target: pit.data.video_data_wds.VideoDataModuleFromConfig
+  params:
+    num_workers: 16
+    batch_size: 1
+
+    train:
+      target: pit.dataset.video_data_wds.SingleDataset
+      params:
+        ds_config:
+          target: pit.dataset.video_data_wds.ImageWebDataset
+          params:
+            path: ";/workspace/cogview_data/img_datasets/clay1b_dataset/coyo_700m_merged_cleaned_wds,/workspace/cogview_data/img_datasets/clay1b_dataset/laion2ben_merged2_cleaned_wds"
+            image_size: [256, 256]
+            meta_names: ['aesthetic_score_laion_v2']
+            filters:
+              - key: aesthetic_score_laion_v2
+                val: 5
+                greater: True
+            interpolation: 1
+        batch_size: 8

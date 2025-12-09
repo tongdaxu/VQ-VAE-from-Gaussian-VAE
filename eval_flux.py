@@ -3,6 +3,8 @@ import os
 import torch.distributed as dist
 from torchvision.utils import save_image
 
+local_rank = int(os.environ["LOCAL_RANK"])
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -19,9 +21,6 @@ from pit.evaluations.psnr import get_psnr
 from pit.evaluations.ssim import get_ssim_and_msssim
 from pit.evaluations.fid.inception import InceptionV3
 from pit.data import SimpleDataset
-import torch.distributed as dist
-
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def print_dict(dict_stat):
@@ -40,11 +39,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--base",
-        default="",
-        type=str,
-    )
-    parser.add_argument(
-        "--ckpt",
         default="",
         type=str,
     )
@@ -75,20 +69,12 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ['WORLD_SIZE'])
-
-    torch.cuda.set_device(local_rank)
-
     dist.init_process_group(
         backend=args.dist_backend,
         init_method="env://",
-        rank=local_rank,
-        world_size=world_size,
     )
 
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    world_size = dist.get_world_size()
 
     BS = args.bs
 
@@ -101,7 +87,7 @@ if __name__ == "__main__":
         image_dataset,
         BS,
         shuffle=False,
-        num_workers=32,
+        num_workers=8,
         sampler=image_sampler,
         drop_last=True,
     )
@@ -109,13 +95,11 @@ if __name__ == "__main__":
     config = OmegaConf.load(args.base)
 
     model = instantiate_from_config(config.model)
-    if args.ckpt != "":
-        missing_keys, unexpected_keys = model.load_state_dict(torch.load(args.ckpt,map_location=torch.device('cpu'))["state_dict"], strict=False)
-        # print("missing_keys")
-        # print(missing_keys)
-    model = model.eval().to(device)
+    model = model.eval().cuda(local_rank)
+    model.load_flux_pipeline()
+
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
-    inception_v3 = InceptionV3([block_idx], normalize_input=False).to(device)
+    inception_v3 = InceptionV3([block_idx], normalize_input=False).cuda(local_rank)
     inception_v3.eval()
 
     all_pred_x = [[] for _ in range(world_size)]
@@ -140,18 +124,13 @@ if __name__ == "__main__":
         ent = - torch.sum(hist * torch.log2(hist + 1e-5))
         return 1 - usage, ent
 
-    zs = []
     with torch.no_grad():
         for ii, (batch) in tqdm(enumerate(image_dataloader)):
             fpaths = batch["fpath"]
             img = batch["img"]
-            img = img.to(device)
-            zhat, info = model.encode(img, return_reg_log=True)
-            zs.append(zhat)
-            rec = model.decode(zhat)
-            if "indices" in info.keys():
-                hist = torch.histogram(info["indices"].cpu().float(), torch.range(0, 65536))
-                all_hist += hist[0]
+            img = img.cuda(local_rank)
+            zhat, indices = model.quant(img)
+            rec = model.dequant(indices)
             # eval metrics ...
             # PSNR
             if args.save:
@@ -204,10 +183,18 @@ if __name__ == "__main__":
 
             total_num += world_size * img.shape[0]
 
+            """
+            for jj in range(BS):
+                iname = inames[jj].split("/")[-1].split(".")[0] + ".png"
+                torchvision.utils.save_image(
+                    img[jj:jj+1], os.path.join(subdirs[0], iname), normalize=True, value_range=(-1,1)
+                )
+                torchvision.utils.save_image(
+                    rec2[jj:jj+1], os.path.join(subdirs[1], iname), normalize=True, value_range=(-1,1)
+                )
+            """
+
         if local_rank == 0:
-            print(cal_ent(all_hist))
-            zs = torch.cat(zs, dim=0)
-            zs = zs.reshape(-1).cpu().numpy()
             for j in range(world_size):
                 all_psnr[j] = torch.cat(all_psnr[j], dim=0).numpy()
             all_psnr_reorg = []

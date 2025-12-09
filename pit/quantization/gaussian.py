@@ -115,6 +115,7 @@ class GaussianQuantRegularizer(nn.Module):
                 zhat = rearrange(zhat, "b (h w) c -> b c h w", h=h)
             info = {"kl_loss": torch.mean(kl_loss), "bits-mean": kl2_mean, "bits-min": kl2_min, "bits-max": kl2_max}
         else:
+
             zhat_noquant = mu + torch.randn_like(mu) * std
             mu = mu.reshape(b, l, self.group, c // self.group).permute(0,1,3,2).reshape(-1, self.group)
             std = std.reshape(b, l, self.group, c // self.group).permute(0,1,3,2).reshape(-1, self.group)
@@ -178,7 +179,7 @@ class GaussianQuantRegularizer(nn.Module):
 class GaussianQuantRegularizer2(nn.Module):
     def __init__(self, dim, codebook_size, dim_idx=1, logvar_range=[-30.0, 20.0], # common parameters
                  tolerance = 0.5, lam_factor=1.01, # train parameters
-                 seed=42, beta=1.0, use_ste=True, backend="torch"):
+                 seed=42, beta=1.0, use_ste=False, backend="torch"):
         super().__init__()
         self.dim_idx = dim_idx
         self.dim = dim
@@ -190,7 +191,7 @@ class GaussianQuantRegularizer2(nn.Module):
         self.lam = 1.0
         self.lam_min = 1.0
         self.lam_max = 1.0
-        self.lam_range = (1e-7, 1e7)
+        self.lam_range = (1e-3, 1e3)
         self.tolerance = tolerance
 
         # inference parameter setup
@@ -222,11 +223,14 @@ class GaussianQuantRegularizer2(nn.Module):
         # kl divergence in log 2
         kl2 = 1.4426 * 0.5 * (torch.pow(mu, 2) + var - 1.0 - logvar)
         # -1, dim, codebook number
-        kl2 = kl2.reshape(-1,codebook_num,self.dim)
-        kl2 = torch.sum(kl2,dim=-1) # sum over dim
+        kl2 = kl2.reshape(-1,self.dim)
+        kl2 = torch.sum(kl2,dim=1) # sum over dim
+
+        print(torch.mean(kl2), torch.min(kl2), torch.max(kl2))
 
         # compute mean, min, max of kl divergence
         kl2_mean, kl2_min, kl2_max = torch.mean(kl2), torch.min(kl2), torch.max(kl2)
+
         ge = (kl2 > self.log_n_samples + self.tolerance).type(kl2.dtype) * self.lam_max
         eq = (kl2 <= self.log_n_samples + self.tolerance).type(kl2.dtype) * (
             kl2 >= self.log_n_samples - self.tolerance
@@ -235,7 +239,8 @@ class GaussianQuantRegularizer2(nn.Module):
 
         # reweight kl divergence according to its relation to log2 codebook_size
         kl_loss = ge * kl2 + eq * kl2 + le * kl2
-        kl_loss = torch.mean(kl_loss) * self.lam
+        kl_loss = torch.sum(kl_loss) * self.lam / z_shape[0]
+
         # update lambda
         if kl2_mean > self.log_n_samples:
             self.lam = self.lam * self.lam_factor
@@ -278,8 +283,8 @@ class GaussianQuantRegularizer2(nn.Module):
         mu, logvar = z.chunk(2, -1)
         logvar = torch.clamp(logvar, self.logvar_range[0], self.logvar_range[1])
         std = torch.exp(0.5 * logvar)
+        var = torch.exp(logvar)
 
-        # reshape everything into (-1, dim)
         mu = mu.reshape(-1,self.dim)
         std = std.reshape(-1,self.dim)
 
@@ -291,7 +296,7 @@ class GaussianQuantRegularizer2(nn.Module):
             gq_cuda.ops.gq_cuda(
                 mu,std,self.prior_samples,self.perturbed,self.dim,mu.shape[0],self.n_samples,self.beta
             )
-            indices = torch.argmax(self.perturbed, dim=1).clone()
+            indices = torch.argmax(self.perturbed, dim=1)
             zhat = torch.index_select(self.prior_samples, 0, indices)
         elif self.backend == "torch":
             # torch impl
@@ -314,7 +319,8 @@ class GaussianQuantRegularizer2(nn.Module):
         else:
             raise ValueError
 
-        zhat = zhat.reshape(-1,codebook_num*self.dim).float()
+        zhat = zhat.reshape(-1,codebook_num*self.dim)
+ 
         indices = indices.reshape(-1,codebook_num)
 
         zhat = zhat.reshape(*z_shape[:-1], -1)
@@ -329,15 +335,11 @@ class GaussianQuantRegularizer2(nn.Module):
 
     def forward(self, z):
         zhat_g, info_g = self.quant_gaussian(z)
+        if self.training and not self.use_ste:
+            return zhat_g, info_g
         with torch.no_grad():
             zhat_v, info_v = self.quant_vq(z)
-        if self.use_ste:
-            zhat = zhat_g - zhat_g.detach() + zhat_v
-        else:
-            if self.training:
-                zhat = zhat_g
-            else:
-                zhat = zhat_v
+        zhat = zhat_g - zhat_g.detach() + zhat_v
         info = info_g | info_v
         return zhat, info
 

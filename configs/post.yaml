@@ -1,36 +1,26 @@
 model:
   base_learning_rate: 1e-4
-  target: pit.models.autoencoder.AutoencodingEngine
+  target: pit.models.postprocessor.PostProcessingEngine
   params:
     input_key: img
     loss_config:
-      target: pit.modules.losses.discriminator_loss.GeneralLPIPSWithDiscriminator
+      target: TODO
       params:
-        perceptual_weight: 1.0
-        disc_start: 20001
-        disc_weight: 0.75
-        learn_logvar: True
+        TODO: TODO
     
-        regularization_weights:
-          kl_loss: 0.1
+        regularization_weights: null
 
-        additional_log_keys: ["kl_loss", "bits-mean", "bits-min", "bits-max"]
-
-        discriminator_config:
-          target: pit.modules.lpips.model.model.NLayerDiscriminator
-          params:
-            input_nc: 3
-            ndf: 160
-            n_layers: 6
-            use_actnorm: True
+        additional_log_keys: null
 
     regularizer_config:
-      target: pit.quantization.gaussian.GaussianQuantRegularizer2
+      target: pit.quantization.gaussian.GaussianQuantRegularizer
       params:
-        dim: 16
-        codebook_size: 65536
-        backend: cuda
-        use_ste: False
+        format: bchw
+        group: 16
+        n_samples: 65536
+        seed: 42
+        beta: 2.0
+        backend: torch
 
     encoder_config:
       target: pit.modules.unet.Encoder
@@ -50,6 +40,28 @@ model:
     decoder_config:
       target: pit.modules.unet.Decoder
       params: ${model.params.encoder_config.params}
+
+    post_config:
+      target: pit.modules.hdit.create_hdit_model
+      params:
+        in_channels: 3
+        out_channels: 3
+        widths: [256, 512, 1024]
+        depths: [2, 2, 8]
+        patch_size: [4, 4]
+        self_attns:
+          - type: neighborhood
+            d_head: 64
+            kernel_size: 7
+          - type: neighborhood
+            d_head: 64
+            kernel_size: 7
+          - type: global
+            d_head: 64
+        mapping_depth: 2
+        mapping_width: 768
+        dropout_rate: [0, 0, 0]
+        mapping_dropout_rate': 0.0
 
 lightning:
 
@@ -83,7 +95,7 @@ lightning:
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
-    max_epochs: 40
+    max_epochs: 10000
 
 data:
   target: pit.data.ImageDataModuleFromConfig

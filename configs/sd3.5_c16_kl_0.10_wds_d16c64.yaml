@@ -1,8 +1,10 @@
 model:
-  base_learning_rate: 1e-4
+  base_learning_rate: 1e-5
   target: pit.models.autoencoder.AutoencodingEngine
   params:
     input_key: img
+    ckpt_path: /workspace/cogview_dev/xutd/xu/pytorch-image-tokenizer/models_256/sd3.5_c16_kl_0.10_wds_d16c64.ckpt
+
     loss_config:
       target: pit.modules.losses.discriminator_loss.GeneralLPIPSWithDiscriminator
       params:
@@ -13,9 +15,7 @@ model:
     
         regularization_weights:
           kl_loss: 0.1
-
-        additional_log_keys: ["kl_loss", "bits-mean", "bits-min", "bits-max"]
-
+        
         discriminator_config:
           target: pit.modules.lpips.model.model.NLayerDiscriminator
           params:
@@ -23,28 +23,25 @@ model:
             ndf: 160
             n_layers: 6
             use_actnorm: True
-
+        
     regularizer_config:
-      target: pit.quantization.gaussian.GaussianQuantRegularizer2
+      target: pit.quantization.gaussian.GaussianRegularizer
       params:
-        dim: 16
-        codebook_size: 65536
-        backend: cuda
-        use_ste: False
-
+        format: bchw
+    
     encoder_config:
       target: pit.modules.unet.Encoder
       params:
         attn_type: vanilla
         double_z: true
-        z_channels: 16
+        z_channels: 64
         resolution: 256
         in_channels: 3
         out_ch: 3
         ch: 128
-        ch_mult: [1, 2, 4, 4]
-        num_res_blocks: 2
-        attn_resolutions: [32]
+        ch_mult: [1, 2, 4, 8, 8]
+        num_res_blocks: 3
+        attn_resolutions: []
         dropout: 0.
     
     decoder_config:
@@ -64,7 +61,7 @@ lightning:
         every_n_train_steps: 10000
   
     image_logger:
-      target: main.ImageLogger
+      target: main_image.ImageLogger
       params:
         disabled: False
         enable_autocast: False
@@ -79,20 +76,30 @@ lightning:
   trainer:
     devices: 0,1,2,3,4,5,6,7
     num_nodes: 1
-    precision: 32
+    precision: bf16-mixed
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
-    max_epochs: 40
+    max_epochs: 10000
 
 data:
-  target: pit.data.ImageDataModuleFromConfig
+  target: pit.data.video_data_wds.VideoDataModuleFromConfig
   params:
     num_workers: 16
-    batch_size: 16
+    batch_size: 1
 
     train:
-      target: pit.data.SimpleDataset
+      target: pit.dataset.video_data_wds.SingleDataset
       params:
-        root: /workspace/cogview_dev/xutd/xu/datasets/ILSVRC/Data/CLS-LOC/train
-        image_size: 256
+        ds_config:
+          target: pit.dataset.video_data_wds.ImageWebDataset
+          params:
+            path: ";/workspace/cogview_data/img_datasets/clay1b_dataset/coyo_700m_merged_cleaned_wds,/workspace/cogview_data/img_datasets/clay1b_dataset/laion2ben_merged2_cleaned_wds"
+            image_size: [256, 256]
+            meta_names: ['aesthetic_score_laion_v2']
+            filters:
+              - key: aesthetic_score_laion_v2
+                val: 5
+                greater: True
+            interpolation: 1
+        batch_size: 8

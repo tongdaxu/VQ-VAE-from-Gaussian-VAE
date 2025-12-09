@@ -11,10 +11,9 @@ model:
         disc_weight: 0.75
         learn_logvar: True
     
-        regularization_weights:
-          kl_loss: 0.1
+        regularization_weights: null
 
-        additional_log_keys: ["kl_loss", "bits-mean", "bits-min", "bits-max"]
+        additional_log_keys: null
 
         discriminator_config:
           target: pit.modules.lpips.model.model.NLayerDiscriminator
@@ -25,19 +24,21 @@ model:
             use_actnorm: True
 
     regularizer_config:
-      target: pit.quantization.gaussian.GaussianQuantRegularizer2
+      target: pit.quantization.gaussian.GaussianQuantRegularizer
       params:
-        dim: 16
-        codebook_size: 65536
-        backend: cuda
-        use_ste: False
-
+        format: bchw
+        group: 14
+        n_samples: 262144
+        seed: 42
+        beta: 1.0
+        backend: torch
+    
     encoder_config:
       target: pit.modules.unet.Encoder
       params:
         attn_type: vanilla
         double_z: true
-        z_channels: 16
+        z_channels: 14
         resolution: 256
         in_channels: 3
         out_ch: 3
@@ -83,7 +84,7 @@ lightning:
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
-    max_epochs: 40
+    max_epochs: 10000
 
 data:
   target: pit.data.ImageDataModuleFromConfig

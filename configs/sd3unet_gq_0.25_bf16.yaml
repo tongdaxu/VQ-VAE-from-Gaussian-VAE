@@ -25,12 +25,12 @@ model:
             use_actnorm: True
 
     regularizer_config:
-      target: pit.quantization.gaussian.GaussianQuantRegularizer2
+      target: pit.quantization.gaussian.GaussianQuantRegularizer
       params:
-        dim: 16
-        codebook_size: 65536
+        format: bchw
+        group: 16
+        n_samples: 65536
         backend: cuda
-        use_ste: False
 
     encoder_config:
       target: pit.modules.unet.Encoder
@@ -79,11 +79,11 @@ lightning:
   trainer:
     devices: 0,1,2,3,4,5,6,7
     num_nodes: 1
-    precision: 32
+    precision: bf16
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
-    max_epochs: 40
+    max_epochs: 10000
 
 data:
   target: pit.data.ImageDataModuleFromConfig
