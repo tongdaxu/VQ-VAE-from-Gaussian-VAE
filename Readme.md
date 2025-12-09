@@ -1,7 +1,8 @@
 # State-of-the-Art VQ-VAE from Gaussian VAE without Training!
 * We train a Gaussian VAE, convert it into VQ-VAE with almost 100% codebook usage, and keeps reconstruction performance!
-* Pre-trained models can be found in [Huggingface](https://huggingface.co/xutongda/GQModel)
-* As flexible to setup as VQ-VAE, supporting: codebook size, codebook dimension, codebook number
+* As flexible to setup as VQ-VAE, supporting: codebook size, codebook dimension, codebook number.
+* Pre-trained models can be found in [[Huggingface]](https://huggingface.co/xutongda/GQModel)
+* Paper can be found in [[Arxiv]](https://arxiv.org/abs/2512.06609)
 
 # Quick Start 
 ## Install dependency
@@ -21,7 +22,7 @@
     pip install --no-build-isolation -e .
     ```
 ## Download pre-trained model 
-* Download model "sd3unet_gq_0.25.ckpt" from [Huggingface](https://huggingface.co/xutongda/GQModel):
+* Download model "sd3unet_gq_0.25.ckpt" from [[Huggingface]](https://huggingface.co/xutongda/GQModel):
     ```bash
     mkdir model_256
     mv "sd3unet_gq_0.25.ckpt" ./model_256
@@ -158,10 +159,23 @@
         indices[i : i + bs] = argmax_indices
         ```
 * Basically we limit the KL divergence of Gaussian VAE close to log2 codebook size. Once this constraint is met, the Gaussian VAE can be converted to VQ-VAE without much loss. 
-* For more information, wait for our paper to come out!
+* For more information, see our paper!
 
 
 # Contact & Ack
 * Largely from https://github.com/Stability-AI/generative-models
 * Any questions or comments goes to: x.tongda@nyu.edu
 * Or if you have wechat: 18510201763
+
+# Reference 
+```
+@misc{xu2025vectorquantizationusinggaussian,
+      title={Vector Quantization using Gaussian Variational Autoencoder}, 
+      author={Tongda Xu and Wendi Zheng and Jiajun He and Jose Miguel Hernandez-Lobato and Yan Wang and Ya-Qin Zhang and Jie Tang},
+      year={2025},
+      eprint={2512.06609},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2512.06609}, 
+}
+```
