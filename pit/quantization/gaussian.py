@@ -18,6 +18,7 @@ def prior_samples(n_samples, n_variable, seed_rec):
     samples_i = torch.from_numpy(norm.ppf(samples_sobol))
     return samples_i
 
+
 class GaussianQuantRegularizer(nn.Module):
     # GaussianQuant Regularizer
     # train() mode: sample as Gaussian VAE, log contains loss function
@@ -94,6 +95,8 @@ class GaussianQuantRegularizer(nn.Module):
             le = (kl2 < self.log_n_samples - self.tolerance).type(kl2.dtype) * self.lam_min
             kl_loss = torch.sum((ge * kl2 + eq * kl2 + le * kl2), dim=[1,2])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+            kl_loss = kl_loss * self.lam
+
             # update lambda
             if kl2_mean > self.log_n_samples:
                 self.lam = self.lam * self.lam_factor
@@ -113,7 +116,7 @@ class GaussianQuantRegularizer(nn.Module):
 
             if self.format == "bchw":
                 zhat = rearrange(zhat, "b (h w) c -> b c h w", h=h)
-            info = {"kl_loss": torch.mean(kl_loss), "bits-mean": kl2_mean, "bits-min": kl2_min, "bits-max": kl2_max}
+            info = {"kl_loss": torch.mean(kl_loss), "bits-mean": kl2_mean, "bits-min": kl2_min, "bits-max": kl2_max, "lam": torch.zeros_like(kl_loss) + self.lam,}
         else:
             zhat_noquant = mu + torch.randn_like(mu) * std
             mu = mu.reshape(b, l, self.group, c // self.group).permute(0,1,3,2).reshape(-1, self.group)

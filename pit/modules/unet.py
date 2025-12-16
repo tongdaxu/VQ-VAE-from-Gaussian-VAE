@@ -134,29 +134,27 @@ class ResnetBlock(nn.Module):
                 self.nin_shortcut = torch.nn.Conv2d(
                     in_channels, out_channels, kernel_size=1, stride=1, padding=0
                 )
-
-    def forward(self, x, temb):
+    def _forward(self, x, temb):
         h = x
         h = self.norm1(h)
         h = nonlinearity(h)
         h = self.conv1(h)
-
         if temb is not None:
             h = h + self.temb_proj(nonlinearity(temb))[:, :, None, None]
-
         h = self.norm2(h)
         h = nonlinearity(h)
         h = self.dropout(h)
         h = self.conv2(h)
-
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
                 x = self.conv_shortcut(x)
             else:
                 x = self.nin_shortcut(x)
-
         return x + h
 
+    def forward(self, x, temb):
+        return self._forward(x, temb)
+        # return torch.utils.checkpoint.checkpoint(self._forward, x, temb, use_reentrant=False)
 
 class LinAttnBlock(LinearAttention):
     """to match AttnBlock usage"""
