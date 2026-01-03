@@ -106,7 +106,7 @@ class GaussianQuantRegularizer(nn.Module):
             if kl2_max > self.log_n_samples + self.tolerance:
                 self.lam_max = self.lam_max * self.lam_factor
             else:
-                self.lam_max / self.lam_max * self.lam_factor
+                self.lam_max = self.lam_max / self.lam_factor
             self.lam_max = max(min(self.lam_max, self.lam_range[1]), 1.0)
             if kl2_min < self.log_n_samples - self.tolerance:
                 self.lam_min = self.lam_min / self.lam_factor
