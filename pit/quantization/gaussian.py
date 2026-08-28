@@ -5,18 +5,202 @@ from torch.distributions import Normal
 from torch.quasirandom import SobolEngine
 from scipy.stats import norm
 import math
-
+import torch.nn.functional as F
+import numpy as np
 try:
     import gq_cuda
     HAS_GQ_CUDA = True
 except ImportError:
     HAS_GQ_CUDA = False
 
-def prior_samples(n_samples, n_variable, seed_rec):
-    sobol = SobolEngine(n_variable, scramble=True, seed=seed_rec)
-    samples_sobol = sobol.draw(n_samples)
-    samples_i = torch.from_numpy(norm.ppf(samples_sobol))
-    return samples_i
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def compute_lds(
+    x: torch.Tensor,
+    r_near: int | None = None,
+    r_far: int | None = None,
+):
+    """
+    Args:
+        x: Tensor of shape (B, C, H, W)
+
+    Returns:
+        lds_per_sample: (B,)
+        lds_mean: scalar
+    """
+    B, C, H, W = x.shape
+    T = H * W
+
+    if r_near is None:
+        r_near = H // 2
+    if r_far is None:
+        r_far = H // 2
+
+    # (B, T, C)
+    feats = x.flatten(2).transpose(1, 2)
+
+    # Normalize for cosine similarity
+    feats = F.normalize(feats, dim=-1)
+
+    # Pairwise cosine similarity matrix
+    # (B, T, T)
+    sim = feats @ feats.transpose(-1, -2)
+
+    # Spatial coordinates
+    yy, xx = torch.meshgrid(
+        torch.arange(H, device=x.device),
+        torch.arange(W, device=x.device),
+        indexing="ij",
+    )
+
+    coords = torch.stack([yy.reshape(-1), xx.reshape(-1)], dim=1)  # (T, 2)
+
+    # Manhattan distance matrix (T, T)
+    dist = (
+        coords[:, None, :] - coords[None, :, :]
+    ).abs().sum(-1)
+
+    # Exclude self-pairs
+    eye = torch.eye(T, dtype=torch.bool, device=x.device)
+
+    near_mask = (dist < r_near) & (~eye)
+    far_mask = (dist >= r_far)
+
+    # Average similarities
+    near_mean = sim[:, near_mask].mean(dim=1)
+    far_mean = sim[:, far_mask].mean(dim=1)
+
+    lds = near_mean - far_mean
+
+    return lds
+
+class DiagonalGaussianDistribution(object):
+    def __init__(self, parameters, deterministic=False):
+        self.parameters = parameters
+        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.deterministic = deterministic
+        self.std = torch.exp(0.5 * self.logvar)
+        self.var = torch.exp(self.logvar)
+        if self.deterministic:
+            self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
+
+    def sample(self):
+        x = self.mean + self.std * torch.randn_like(self.mean).to(device=self.parameters.device)
+        return x
+
+    def kl(self, other=None):
+        if self.deterministic:
+            return torch.Tensor([0.0])
+        else:
+            if other is None:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
+                    dim=[1, 2, 3],
+                )
+            else:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean - other.mean, 2) / other.var
+                    + self.var / other.var
+                    - 1.0
+                    - self.logvar
+                    + other.logvar,
+                    dim=[1, 2, 3],
+                )
+
+    def nll(self, sample, dims=[1, 2, 3]):
+        if self.deterministic:
+            return torch.Tensor([0.0])
+        logtwopi = np.log(2.0 * np.pi)
+        return 0.5 * torch.sum(
+            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
+            dim=dims,
+        )
+
+    def mode(self):
+        return self.mean
+
+class GaussianRegularizer(nn.Module):
+    def __init__(self, sample: bool = True):
+        super().__init__()
+        self.sample = sample
+
+    def get_trainable_parameters(self):
+        yield from ()
+
+    def forward(self, z: torch.Tensor):
+        log = dict()
+        posterior = DiagonalGaussianDistribution(z)
+        if self.sample:
+            z = posterior.sample()
+        else:
+            z = posterior.mode()
+        kl_loss = posterior.kl()
+        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+        log["kl_loss"] = kl_loss
+        return z, log
+
+def perturb_angle(z: torch.Tensor, angle_deg: float = 45.0, dim: int = 1):
+    """
+    Perturb a normalized tensor so that the angle between z and zp
+    is exactly angle_deg along dimension `dim`.
+
+    Args:
+        z: Input tensor. Assumed to be unit-normalized along `dim`.
+           Example shape: (b, c, h, w)
+        angle_deg: Target angle in degrees.
+        dim: Feature dimension along which vectors are defined.
+
+    Returns:
+        zp: Perturbed tensor with the same shape as z.
+    """
+    theta = math.radians(angle_deg)
+
+    # Random direction
+    noise = torch.randn_like(z)
+
+    # Remove component parallel to z
+    noise = noise - (noise * z).sum(dim=dim, keepdim=True) * z
+
+    # Normalize orthogonal direction
+    u = noise / (torch.norm(noise, dim=dim, keepdim=True) + 1e-8)
+
+    # Rotate by theta
+    zp = math.cos(theta) * z + math.sin(theta) * u
+
+    return zp
+
+class UnitSphereRegularizer(nn.Module):
+    def __init__(self, eps: 1e-4, am=45.0, denoise=False, noise_max=1.0):
+        super().__init__()
+        self.eps = eps
+        self.am = am
+        self.denoise = denoise
+        self.noise_max = noise_max
+
+    def get_trainable_parameters(self):
+        yield from ()
+    
+    def normalize(self, z):
+        return z / (torch.norm(z, dim=1, keepdim=True) + self.eps)
+
+    def forward(self, z: torch.Tensor):
+        log = dict()
+        z = self.normalize(z)
+        if self.am > 0:
+            z_m = perturb_angle(z, angle_deg=self.am)
+            cos_sim = F.cosine_similarity(z.reshape(z.shape[0], -1), z_m.reshape(z_m.shape[0], -1), dim=1)
+            log["z_m"] = z_m
+            log["cos_sim"] = cos_sim.mean()
+            log["lds"] = compute_lds(z)
+        if self.denoise:
+            z_noise = self.normalize(torch.randn_like(z))
+            z_mask = torch.rand_like(z[:,0:1,0:1,0:1])
+            z_mask = torch.clamp(z_mask * 1.1, 1 - self.noise_max, 1.0)
+            z = z_mask * z + (1 - z_mask) * z_noise
+        return z, log
 
 class GaussianQuantRegularizer(nn.Module):
     # GaussianQuant Regularizer

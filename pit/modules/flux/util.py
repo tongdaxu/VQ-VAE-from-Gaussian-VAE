@@ -2,7 +2,6 @@ import os
 from dataclasses import dataclass
 
 import torch
-import cv2
 import numpy as np
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
@@ -78,28 +77,6 @@ def HWC3(x):
 def safer_memory(x):
     # Fix many MAC/AMD problems
     return np.ascontiguousarray(x.copy()).copy()
-
-#https://github.com/Mikubill/sd-webui-controlnet/blob/main/scripts/processor.py#L17
-#Added upscale_method, mode params
-def resize_image_with_pad(input_image, resolution, skip_hwc3=False, mode='edge'):
-    if skip_hwc3:
-        img = input_image
-    else:
-        img = HWC3(input_image)
-    H_raw, W_raw, _ = img.shape
-    if resolution == 0:
-        return img, lambda x: x
-    k = float(resolution) / float(min(H_raw, W_raw))
-    H_target = int(np.round(float(H_raw) * k))
-    W_target = int(np.round(float(W_raw) * k))
-    img = cv2.resize(img, (W_target, H_target), interpolation=cv2.INTER_AREA)
-    H_pad, W_pad = pad64(H_target), pad64(W_target)
-    img_padded = np.pad(img, [[0, H_pad], [0, W_pad], [0, 0]], mode=mode)
-
-    def remove_pad(x):
-        return safer_memory(x[:H_target, :W_target, ...])
-
-    return safer_memory(img_padded), remove_pad
 
 
 @dataclass

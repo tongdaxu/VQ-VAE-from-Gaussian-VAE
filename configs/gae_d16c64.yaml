@@ -1,9 +1,8 @@
 model:
-  base_learning_rate: 1e-5
+  base_learning_rate: 2e-5
   target: pit.models.autoencoder.AutoencodingEngine
   params:
     input_key: img
-    ckpt_path: /workspace/cogview_dev/xutd/xu/generative-models/logs/2025-09-20T05-55-52_dino3_ae_wds_d8c16/checkpoints/last.ckpt
 
     loss_config:
       target: pit.modules.losses.discriminator_loss.GeneralLPIPSWithDiscriminator
@@ -13,8 +12,7 @@ model:
         disc_weight: 0.75
         learn_logvar: True
     
-        regularization_weights:
-          kl_loss: 0.1
+        regularization_weights: {}
         
         discriminator_config:
           target: pit.modules.lpips.model.model.NLayerDiscriminator
@@ -23,31 +21,30 @@ model:
             ndf: 160
             n_layers: 6
             use_actnorm: True
-
+        
     regularizer_config:
-      target: pit.quantization.gaussian.IdentityRegularizer
+      target: pit.quantization.gaussian.UnitSphereRegularizer
+      params:
+        eps: 1e-4
     
     encoder_config:
-      target: pit.models.foundation_models.DINOEncoder
-      params:
-        type: dinov3
-        z_channels: 16
-        down_factor: 8
-    
-    decoder_config:
-      target: pit.modules.unet.Decoder
+      target: pit.modules.unet.Encoder
       params:
         attn_type: vanilla
         double_z: false
-        z_channels: 16
+        z_channels: 64
         resolution: 256
         in_channels: 3
         out_ch: 3
         ch: 128
-        ch_mult: [1, 4, 8, 8]
-        num_res_blocks: 3
+        ch_mult: [1, 2, 4, 8, 8]
+        num_res_blocks: 2
         attn_resolutions: []
         dropout: 0.
+    
+    decoder_config:
+      target: pit.modules.unet.Decoder
+      params: ${model.params.encoder_config.params}
 
 lightning:
 
@@ -62,7 +59,7 @@ lightning:
         every_n_train_steps: 10000
   
     image_logger:
-      target: main_image.ImageLogger
+      target: main.ImageLogger
       params:
         disabled: False
         enable_autocast: False
@@ -81,26 +78,16 @@ lightning:
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
-    max_epochs: 10000
+    max_epochs: 40
 
 data:
-  target: pit.data.video_data_wds.VideoDataModuleFromConfig
+  target: pit.data.ImageDataModuleFromConfig
   params:
-    num_workers: 16
-    batch_size: 1
+    num_workers: 32
+    batch_size: 32
 
     train:
-      target: pit.dataset.video_data_wds.SingleDataset
+      target: pit.data.SimpleDataset
       params:
-        ds_config:
-          target: pit.dataset.video_data_wds.ImageWebDataset
-          params:
-            path: ";/workspace/cogview_data/img_datasets/clay1b_dataset/coyo_700m_merged_cleaned_wds,/workspace/cogview_data/img_datasets/clay1b_dataset/laion2ben_merged2_cleaned_wds"
-            image_size: [256, 256]
-            meta_names: ['aesthetic_score_laion_v2']
-            filters:
-              - key: aesthetic_score_laion_v2
-                val: 5
-                greater: True
-            interpolation: 1
-        batch_size: 8
+        root: /mnt/task_runtime/imagenet21k_list.txt
+        image_size: 256

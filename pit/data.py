@@ -98,10 +98,15 @@ class SimpleDataset(VisionDataset):
         return len(self.fpaths)
 
     def __getitem__(self, index: int):
-        fpath = self.fpaths[index]
-        img = Image.open(fpath).convert("RGB")
-        if self.transform is not None:
-            img = self.transform(img)
+        try:
+            fpath = self.fpaths[index]
+            img = Image.open(fpath).convert("RGB")
+            if self.transform is not None:
+                img = self.transform(img)
+        except Exception as e:
+            print(f"Error loading image {fpath}: {e}")
+            return self.__getitem__((index + 1) % len(self.fpaths))
+
         return {
             "img": img,
             "fpath": fpath,

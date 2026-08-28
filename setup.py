@@ -8,6 +8,7 @@ setup(name="pit", version="0.0.0", packages=[
     "pit.evaluations.fvd",
     "pit.models",
     "pit.modules",
+    "pit.modules.vtp",
     "pit.modules.losses",
     "pit.modules.lpips",
     "pit.modules.lpips.loss",

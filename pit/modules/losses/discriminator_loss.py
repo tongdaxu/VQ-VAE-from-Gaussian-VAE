@@ -12,7 +12,7 @@ from pit.util import default, instantiate_from_config
 from pit.modules.lpips.loss.lpips import LPIPS
 from pit.modules.lpips.model.model import weights_init
 from pit.modules.lpips.vqperceptual import hinge_d_loss, vanilla_d_loss
-
+from pit.modules.losses.sit import SiT_L_1
 
 class GeneralLPIPSWithDiscriminator(nn.Module):
     def __init__(
@@ -36,7 +36,10 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         cos_margin = 0.5,
         distmat_margin = 0.25,
         distmat_weight = 1.0,
-        cos_weight = 1.0
+        cos_weight = 1.0,
+        aug_weight=0.0,
+        margin_anneal_step=-1,
+        margin_anneal_param=1.0,
     ):
         super().__init__()
         self.dims = dims
@@ -57,7 +60,9 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         self.distmat_margin = distmat_margin
         self.distmat_weight = distmat_weight
         self.cos_weight = cos_weight
-
+        self.aug_weight = aug_weight
+        self.margin_anneal_step = margin_anneal_step
+        self.margin_anneal_param = margin_anneal_param
         # output log variance
         self.logvar = nn.Parameter(
             torch.full((), logvar_init), requires_grad=learn_logvar
@@ -297,8 +302,13 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
                 z_cos_sim = torch.einsum('bci,bcj->bij', z_norm, z_norm)
                 aux_feature_cos_sim = torch.einsum('bci,bcj->bij', aux_feature_norm, aux_feature_norm)
                 diff = torch.abs(z_cos_sim - aux_feature_cos_sim)
-                vf_loss_1 = torch.nn.functional.relu(diff-self.distmat_margin).mean()
-                vf_loss_2 = torch.nn.functional.relu(1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, zp)).mean()
+                if global_step > self.margin_anneal_step:
+                    vf_loss_1 = torch.nn.functional.relu(diff-self.distmat_margin).mean()
+                    vf_loss_2 = torch.nn.functional.relu(1 - self.cos_margin - torch.nn.functional.cosine_similarity(aux_feature, zp)).mean()
+                else:
+                    vf_loss_1 = torch.nn.functional.relu(diff-self.distmat_margin * self.margin_anneal_param).mean()
+                    vf_loss_2 = torch.nn.functional.relu(1 - self.cos_margin * self.margin_anneal_param - torch.nn.functional.cosine_similarity(aux_feature, zp)).mean()
+
                 vf_loss = vf_loss_1*self.distmat_weight + vf_loss_2*self.cos_weight
             else:
                 vf_loss = None
@@ -318,6 +328,33 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
             else:
                 loss = weighted_nll_loss + d_weight * self.disc_factor * g_loss
 
+            if "z_m" in regularization_log:
+                x_m = regularization_log["x_m"]
+                rec = reconstructions.detach()
+                aug_loss = torch.abs(x_m.contiguous() - rec.contiguous())
+                if self.perceptual_weight > 0:
+                    if self.dims > 2:
+                        t = x_m.shape[2]
+                        inputs_2d, reconstructions_2d = map(
+                            lambda x: rearrange(x, "b c t h w -> (b t) c h w"),
+                            (x_m, rec),
+                        )
+                        aug_p_loss = self.perceptual_loss(
+                            inputs_2d.contiguous(), reconstructions_2d.contiguous()
+                        )
+                        aug_p_loss = rearrange(aug_p_loss, "(b t) c ... -> b c t ...", t=t)
+                    else:
+                        aug_p_loss = self.perceptual_loss(
+                            x_m.contiguous(), rec.contiguous()
+                        )
+                    aug_loss = aug_loss + self.perceptual_weight * aug_p_loss
+            else:
+                aug_loss = None
+
+            if aug_loss is not None:
+                log[f"{split}/loss/aug_loss"] = aug_loss.detach().float().mean()
+                loss = loss + self.get_nll_loss(aug_loss, weights, detach_logvar=True)[1] * self.aug_weight
+
             for k in regularization_log:
                 if k in self.regularization_weights:
                     loss = loss + self.regularization_weights[k] * regularization_log[k]
@@ -333,6 +370,7 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
                     f"{split}/scalars/d_weight": d_weight.detach(),
                 }
             )
+
             return loss, log
 
         elif optimizer_idx == 1:
@@ -358,8 +396,273 @@ class GeneralLPIPSWithDiscriminator(nn.Module):
         self,
         rec_loss: torch.Tensor,
         weights: Optional[Union[float, torch.Tensor]] = None,
+        detach_logvar: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        nll_loss = rec_loss / torch.exp(self.logvar) + self.logvar
+        if detach_logvar:
+            logvar = self.logvar.detach()
+        else:
+            logvar = self.logvar
+        nll_loss = rec_loss / torch.exp(logvar) + logvar
+        weighted_nll_loss = nll_loss
+        if weights is not None:
+            weighted_nll_loss = weights * nll_loss
+        weighted_nll_loss = torch.sum(weighted_nll_loss) / weighted_nll_loss.shape[0]
+        nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
+
+        return nll_loss, weighted_nll_loss
+
+
+class GeneralLPIPSWithSIT(nn.Module):
+    def __init__(
+        self,
+        disc_start: int,
+        logvar_init: float = 0.0,
+        perceptual_weight: float = 1.0,
+        scale_input_to_tgt_size: bool = False,
+        dims: int = 2,
+        learn_logvar: bool = False,
+        vae_align_proj_coeff = 1.5,
+        proj_coeff = 0.5,
+        regularization_weights: Union[None, Dict[str, float]] = None,
+        additional_log_keys: Optional[List[str]] = None,
+        
+    ):
+        super().__init__()
+        self.dims = dims
+        if self.dims > 2:
+            print(
+                f"running with dims={dims}. This means that for perceptual loss "
+                f"calculation, the LPIPS loss will be applied to each frame "
+                f"independently."
+            )
+        self.scale_input_to_tgt_size = scale_input_to_tgt_size
+        self.perceptual_loss = LPIPS().eval()
+        self.perceptual_weight = perceptual_weight
+        # output log variance
+        self.logvar = nn.Parameter(
+            torch.full((), logvar_init), requires_grad=learn_logvar
+        )
+        self.learn_logvar = learn_logvar
+
+        self.discriminator = SiT_L_1(
+            input_size=16,
+            in_channels=128,
+            num_classes=1,
+            class_dropout_prob=0,
+            z_dims=[1024],
+            encoder_depth=8,
+            bn_momentum=0.1,
+            fused_attn=True,
+            qk_norm=False,
+        )
+        self.discriminator_iter_start = disc_start
+        self.regularization_weights = default(regularization_weights, {})
+
+        self.forward_keys = [
+            "optimizer_idx",
+            "global_step",
+            "last_layer",
+            "enc_last_layer",
+            "split",
+            "regularization_log",
+        ]
+
+        self.additional_log_keys = set(default(additional_log_keys, []))
+        self.additional_log_keys.update(set(self.regularization_weights.keys()))
+
+        self.vae_align_proj_coeff = vae_align_proj_coeff
+        self.proj_coeff = proj_coeff
+
+    def get_trainable_parameters(self) -> Iterator[nn.Parameter]:
+        return self.discriminator.parameters()
+
+    def get_trainable_autoencoder_parameters(self) -> Iterator[nn.Parameter]:
+        if self.learn_logvar:
+            yield self.logvar
+        yield from ()
+
+    @torch.no_grad()
+    def log_images(
+        self, inputs: torch.Tensor, reconstructions: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        # calc logits of real/fake
+        return {}
+
+    def calculate_adaptive_weight(
+        self, nll_loss: torch.Tensor, g_loss: torch.Tensor, last_layer: torch.Tensor
+    ) -> torch.Tensor:
+        nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
+        g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+
+        d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
+        d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+        d_weight = d_weight * self.discriminator_weight
+        return d_weight
+
+    def calculate_adaptive_weight_vf(self, nll_loss, vf_loss, last_layer=None):
+        if last_layer is not None:
+            nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True, allow_unused=True)[0]
+            vf_grads = torch.autograd.grad(vf_loss, last_layer, retain_graph=True, allow_unused=True)[0]
+        else:
+            nll_grads = torch.autograd.grad(nll_loss, self.last_layer[0], retain_graph=True, allow_unused=True)[0]
+            vf_grads = torch.autograd.grad(vf_loss, self.last_layer[0], retain_graph=True, allow_unused=True)[0]
+
+        vf_weight = torch.norm(nll_grads) / (torch.norm(vf_grads) + 1e-4)
+        vf_weight = torch.clamp(vf_weight, 0.0, 1e4).detach()
+        return vf_weight
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        reconstructions: torch.Tensor,
+        *,  # added because I changed the order here
+        regularization_log: Dict[str, torch.Tensor],
+        optimizer_idx: int,
+        global_step: int,
+        last_layer: torch.Tensor,
+        enc_last_layer = None,
+        split: str = "train",
+        weights: Union[None, float, torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, dict]:
+        if self.scale_input_to_tgt_size:
+            inputs = torch.nn.functional.interpolate(
+                inputs, reconstructions.shape[2:], mode="bicubic", antialias=True
+            )
+
+        rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
+        if self.perceptual_weight > 0:
+            if self.dims > 2:
+                t = inputs.shape[2]
+                inputs_2d, reconstructions_2d = map(
+                    lambda x: rearrange(x, "b c t h w -> (b t) c h w"),
+                    (inputs, reconstructions),
+                )
+                p_loss = self.perceptual_loss(
+                    inputs_2d.contiguous(), reconstructions_2d.contiguous()
+                )
+                p_loss = rearrange(p_loss, "(b t) c ... -> b c t ...", t=t)
+            else:
+                p_loss = self.perceptual_loss(
+                    inputs.contiguous(), reconstructions.contiguous()
+                )
+            rec_loss = rec_loss + self.perceptual_weight * p_loss
+
+        nll_loss, weighted_nll_loss = self.get_nll_loss(rec_loss, weights)
+        z = regularization_log["z"]
+        aux_feature = regularization_log["aux_feature"]
+        ab, ac, ah, aw = aux_feature.shape
+        aux_feature = aux_feature.reshape(ab, ac, ah * aw).permute(0, 2, 1)
+
+        # now the GAN part
+        if optimizer_idx == 0:
+            # generator update
+            if global_step >= self.discriminator_iter_start or not self.training:
+                
+                self.discriminator.eval()
+                
+                g_loss_kwargs = dict(
+                    path_type="linear",
+                    prediction="v",
+                    align_only=True,
+                    weighting="uniform",
+                )
+                
+                vae_align_outputs = self.discriminator(
+                    x=z,
+                    y=torch.zeros(size=(z.shape[0],)).to(device=z.device, dtype=torch.long),
+                    zs=[aux_feature],
+                    loss_kwargs=g_loss_kwargs,
+                    time_input=None,
+                    noises=None,
+                )
+
+                proj_loss = vae_align_outputs["proj_loss"].mean()
+                if self.training:
+                    proj_weight = self.calculate_adaptive_weight_vf(
+                        nll_loss, proj_loss, last_layer=enc_last_layer
+                    )
+                else:
+                    proj_weight = torch.tensor(1.0)
+                self.time_input = vae_align_outputs["time_input"]
+                self.noises = vae_align_outputs["noises"]
+            else:
+                proj_weight = torch.tensor(0.0)
+                proj_loss = torch.tensor(0.0, requires_grad=True)
+                self.time_input = None
+                self.noises = None
+
+            log = dict()
+
+            loss = weighted_nll_loss + proj_weight * self.vae_align_proj_coeff * proj_loss
+
+
+            for k in regularization_log:
+                if k in self.regularization_weights:
+                    loss = loss + self.regularization_weights[k] * regularization_log[k]
+                if k in self.additional_log_keys:
+                    log[f"{split}/{k}"] = regularization_log[k].detach().float().mean()
+            log.update(
+                {
+                    f"{split}/loss/total": loss.clone().detach().mean(),
+                    f"{split}/loss/nll": nll_loss.detach().mean(),
+                    f"{split}/loss/rec": rec_loss.detach().mean(),
+                    f"{split}/loss/vae_proj_loss": proj_loss.detach().mean(),
+                    f"{split}/scalars/logvar": self.logvar.detach(),
+                    f"{split}/scalars/proj_weight": proj_weight.detach(),
+                }
+            )
+
+            return loss, log
+
+        elif optimizer_idx == 1:
+
+            self.discriminator.train()
+
+            d_loss_kwargs = dict(
+                path_type="linear",
+                prediction="v",
+                weighting="uniform",
+                align_only=False,
+            )
+            # second pass for discriminator update
+            sit_outputs = self.discriminator(
+                x=z.detach(),
+                y=torch.zeros(size=(z.shape[0],)).to(device=z.device, dtype=torch.long),
+                zs=[aux_feature],
+                loss_kwargs=d_loss_kwargs,
+                time_input=self.time_input,
+                noises=self.noises,
+            )
+
+            if global_step >= self.discriminator_iter_start or not self.training:
+                denoising_loss = sit_outputs["denoising_loss"].mean()
+                proj_loss = sit_outputs["proj_loss"].mean()
+                sit_loss = denoising_loss + self.proj_coeff * proj_loss
+            else:
+                denoising_loss = torch.tensor(0.0, requires_grad=True)
+                proj_loss = torch.tensor(0.0, requires_grad=True)
+                sit_loss = torch.tensor(0.0, requires_grad=True)
+
+            log = {
+                f"{split}/loss/denoising_loss": denoising_loss.clone().detach().mean(),
+                f"{split}/loss/proj_loss": proj_loss.clone().detach().mean(),
+                f"{split}/loss/sit_loss": sit_loss.clone().detach().mean(),
+            }
+            return sit_loss, log
+        else:
+            raise NotImplementedError(f"Unknown optimizer_idx {optimizer_idx}")
+
+    def get_nll_loss(
+        self,
+        rec_loss: torch.Tensor,
+        weights: Optional[Union[float, torch.Tensor]] = None,
+        detach_logvar: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if detach_logvar:
+            logvar = self.logvar.detach()
+        else:
+            logvar = self.logvar
+        nll_loss = rec_loss / torch.exp(logvar) + logvar
         weighted_nll_loss = nll_loss
         if weights is not None:
             weighted_nll_loss = weights * nll_loss
